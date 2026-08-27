@@ -1,0 +1,19 @@
+# local user settings (ship config.example.json instead)
+config.json
+
+# runtime output
+logs/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# editors / os
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

@@ -1,0 +1,147 @@
+{
+  "fps": 60,
+  "quality": "linear",
+  "vividness": 3.984,
+  "grid": [
+    48,
+    27
+  ],
+  "letterbox": true,
+  "pause_on_lock": true,
+  "idle_timeout": 0,
+  "smoothing": 0.353,
+  "saturation": 0.866,
+  "gamma": 0.853,
+  "brightness": 1.0,
+  "black_floor": 6,
+  "monitor_hz": 30,
+  "mode_refresh_sec": 5,
+  "rescan_sec": 20,
+  "kbd_brightness": 16,
+  "enabled": {
+    "mobo": true,
+    "kbd": true,
+    "mouse": true,
+    "monitor": true,
+    "bm38": true,
+    "am8": true
+  },
+  "device": {
+    "mobo": {
+      "link": false,
+      "saturation": 1.195,
+      "gamma": 0.853,
+      "brightness": 1.0,
+      "gain": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "kbd": {
+      "link": false,
+      "saturation": 2.059,
+      "gamma": 0.847,
+      "brightness": 1.0,
+      "gain": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "mouse": {
+      "link": false,
+      "saturation": 1.729,
+      "gamma": 0.853,
+      "brightness": 1.0,
+      "gain": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "monitor": {
+      "link": false,
+      "saturation": 1.398,
+      "gamma": 0.853,
+      "brightness": 1.0,
+      "gain": [
+        0.8,
+        1.0,
+        1.0
+      ]
+    },
+    "bm38": {
+      "link": false,
+      "saturation": 1.576,
+      "gamma": 0.854,
+      "brightness": 0.496,
+      "gain": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "am8": {
+      "link": false,
+      "saturation": 1.551,
+      "gamma": 0.847,
+      "brightness": 0.305,
+      "gain": [
+        1.202,
+        1.002,
+        0.79
+      ]
+    }
+  },
+  "regions": {
+    "mobo": {
+      "x": 0.25,
+      "y": 0.25,
+      "w": 0.5,
+      "h": 0.5,
+      "axis": "avg",
+      "reverse": false
+    },
+    "kbd": {
+      "x": 0.0,
+      "y": 0.7857555271627501,
+      "w": 0.8341176470588235,
+      "h": 0.13980430528375734,
+      "axis": "x",
+      "reverse": false
+    },
+    "mouse": {
+      "x": 0.8358169934640522,
+      "y": 0.7871043651242902,
+      "w": 0.16418300653594772,
+      "h": 0.13980430528375734,
+      "axis": "y",
+      "reverse": false
+    },
+    "monitor": {
+      "x": 0.25,
+      "y": 0.25,
+      "w": 0.5,
+      "h": 0.5,
+      "axis": "avg",
+      "reverse": false
+    },
+    "bm38": {
+      "x": 0.8766666666666667,
+      "y": 0.3542074363992172,
+      "w": 0.12333333333333334,
+      "h": 0.3589823874755381,
+      "axis": "x",
+      "reverse": false
+    },
+    "am8": {
+      "x": 0.8783006535947713,
+      "y": 0.4461839530332681,
+      "w": 0.12169934640522875,
+      "h": 0.18677103718199609,
+      "axis": "grid",
+      "reverse": false
+    }
+  }
+}
