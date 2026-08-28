@@ -129,7 +129,18 @@ OpenRGB's `SteelSeriesApex8ZoneController` (GPL-2.0-or-later), which is why this
 same licence.
 
 `hidapi.dll` is bundled for convenience and is distributed under the BSD-3-Clause licence by the
-[hidapi project](https://github.com/libusb/hidapi).
+[hidapi project](https://github.com/libusb/hidapi). It is the unmodified **0.14.0** Windows x64
+release binary. Since you should not take a stranger's DLL on trust, verify it before running
+anything:
+
+```powershell
+(Get-FileHash hidapi.dll -Algorithm SHA256).Hash
+# EBEB835E2B4530ED68843F19D6A2604C51772E3C26E7F542FDE194075F82D9B4
+```
+
+If you would rather not use the bundled copy at all, delete it and drop in `hidapi.dll` from the
+[official 0.14.0 release](https://github.com/libusb/hidapi/releases/tag/hidapi-0.14.0) — nothing
+here depends on this particular build.
 
 Device names and trademarks belong to their respective owners. This project is not affiliated with
 or endorsed by ASUS, SteelSeries, Fifine, Razer, or OpenRGB.
