@@ -38,7 +38,9 @@ Both of these look identical from software — the device reports success and si
 - **Vendor software reclaims the device.** Fifine Genie, SignalRGB and friends pull hardware back
   onto their own profile. OpenRGB keeps accepting colour writes afterwards and returns success, so
   the device reads as perfectly healthy while doing nothing. Direct mode is therefore
-  **re-asserted every few seconds** rather than set once.
+  **checked every few seconds and re-asserted when it has been taken away**, rather than set once.
+  Checked, not blindly re-sent: a mode switch is a real one on the hardware, and re-sending it on a
+  timer shows up as a periodic blip on every device.
 - **A device disappears or shows up late.** Missing devices are retried on a background timer, so
   plugging something in — or starting OpenRGB after the app — no longer means restarting anything.
 
@@ -109,10 +111,12 @@ The interesting keys:
 | `grid` | sampling grid resolution |
 | `regions` | per-device screen rectangle + sampling axis (`x`, `y`, `avg`, `grid`) |
 | `device` | per-device saturation, gamma, brightness, RGB gain |
+| `orgb_hz` | cap on colour writes per second per OpenRGB device (the HID drivers have their own) |
 | `letterbox` | ignore black bars when sampling |
 | `pause_on_lock` | stop driving devices while the workstation is locked |
 | `rescan_sec` | how often to retry missing devices |
-| `mode_refresh_sec` | how often to re-assert direct mode |
+| `mode_refresh_sec` | how often to check that devices are still in direct mode |
+| `mode_verify` | read the current mode before re-asserting it; `false` re-asserts blind |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.
 

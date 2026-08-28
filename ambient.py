@@ -12,9 +12,12 @@ again, so "OpenRGB has it" is the less likely of the two.
 Two things run on their own timers alongside the frame loop, both because a
 device can stop responding without anything reporting an error:
 
-  * Direct mode is re-asserted every few seconds. Vendor software pulls devices
-    back onto its own profile; OpenRGB keeps accepting colour writes afterwards
-    and returns success, so the device reads as healthy while sitting unlit.
+  * Direct mode is checked every few seconds and re-asserted if something has
+    moved a device out of it. Vendor software pulls devices back onto its own
+    profile; OpenRGB keeps accepting colour writes afterwards and returns
+    success, so the device reads as healthy while sitting unlit. The check
+    matters: UPDATEMODE is a real mode switch on the hardware, so re-sending it
+    unconditionally is a visible blip every few seconds.
   * Missing devices are retried. Plugging something in, or starting OpenRGB
     late, no longer means restarting the app.
 
@@ -76,6 +79,16 @@ DEFAULTS = {
     "brightness": 1.00,
     "black_floor": 6,          # screen levels below this have no trustworthy hue
     "monitor_hz": 30,
+    "orgb_hz": 30,             # cap on UPDATELEDS per second, per OpenRGB device.
+                               # The HID drivers have always had one (StreamDevice
+                               # .MAX_FPS); the SDK path did not, so "fps": 60 meant
+                               # 60 writes/s at an Aura controller on SMBus. Drop to
+                               # 15-20 if the motherboard still flickers.
+    "mode_verify": True,       # check what mode a device is in before re-asserting
+                               # Direct. UPDATEMODE is a real mode switch on the
+                               # hardware, so an unconditional re-assert blips every
+                               # device every mode_refresh_sec. False re-asserts
+                               # blind, the way this used to.
     "mode_refresh_sec": 5,     # re-assert Direct mode this often; 0 = never.
                                # Vendor software (Synapse) steals devices back
                                # out of Direct and OpenRGB reports no error.
@@ -228,6 +241,7 @@ class Smoother:
 
 class Engine:
     MAX_FAULTS = 5          # consecutive write failures before a device is dropped
+    ORGB_REFRESH_SEC = 2.0  # re-send an unchanged frame to an SDK device this often
 
     def __init__(self, log=print):
         self.log = log
@@ -282,6 +296,8 @@ class Engine:
             "monitor": 3, "bm38": 48, "am8": 12,
         }
         self.sm = {k: Smoother(n) for k, n in self.counts.items()}
+        self._orgb_last = {k: None for k in ORGB_KEYS}   # last frame we sent
+        self._orgb_sent = {k: 0.0 for k in ORGB_KEYS}    # when we sent it
         self._last_mon = 0.0
         self._last_mode_refresh = time.time()
         self._last_rescan = time.time()
@@ -332,6 +348,8 @@ class Engine:
         for key in ORGB_KEYS:
             if getattr(self, key) is not None:
                 continue
+            if key == "kbd" and self.kbd_hid is not None:
+                continue        # already ours over HID; two writers = flicker
             d = self._find_orgb(key)
             setattr(self, key, d)
             if d:
@@ -397,14 +415,22 @@ class Engine:
         return self.counts.get(key, 1)
 
     def _refresh_modes(self):
-        """Re-assert Direct on the OpenRGB devices.
+        """Put back into Direct anything that has been moved out of it.
 
         Vendor software - Razer Synapse in particular - quietly pulls a device
         back out of Direct and onto its own profile. Nothing surfaces: OpenRGB
         keeps accepting UPDATELEDS over the socket and returns no error, so the
         device still reads as present and enabled while sitting there unlit.
         That is why stopping and starting the app "fixes" it - a fresh Engine
-        re-sends the mode. Send it periodically instead.
+        re-sends the mode.
+
+        This used to re-send the mode unconditionally on that timer. UPDATEMODE
+        is a real mode switch on the hardware, not a no-op when the device is
+        already in Direct: the controller reloads the mode and shows its own
+        default until the next colour frame lands. On a timer that is a
+        guaranteed blip on every device every few seconds - on a static screen
+        as much as a moving one. Ask what mode it is in first, and only pay for
+        the switch when the answer is wrong.
         """
         every = CFG.get("mode_refresh_sec", 5)
         if not every:
@@ -413,21 +439,52 @@ class Engine:
             return
         self._last_mode_refresh = time.time()
         if self.orgb:
-            for key in ORGB_KEYS:
-                d = self.dev(key)
-                if d and self.on(key):
-                    try:
-                        self.orgb.set_direct(d)
-                    except Exception as e:
-                        self.log(f"{key}: mode refresh failed: "
-                                 f"{type(e).__name__}: {e}")
+            self._repair_modes()
         # the keyboard's own brightness is moved by Fn+F11/F12, so re-assert it
-        if self.kbd_hid and self.on("kbd"):
+        if self.kbd_hid and self.kbd is None and self.on("kbd"):
             try:
                 self.kbd_hid.brightness = None
                 self.kbd_hid.set_brightness(CFG.get("kbd_brightness", 16))
             except Exception:
                 pass
+
+    def _repair_modes(self):
+        """One readback for every SDK device; re-assert Direct on the strays."""
+        live = [(k, self.dev(k)) for k in ORGB_KEYS if self.dev(k) and self.on(k)]
+        if not live:
+            return
+        verify = CFG.get("mode_verify", True)
+        if verify:
+            try:
+                self.orgb.sync_active_modes([d for _k, d in live])
+            except Exception as e:
+                # readback is the cheap path, not the safe one: if it fails, do
+                # what this did before and re-assert blind
+                self.log(f"mode readback failed ({type(e).__name__}: {e}) "
+                         f"- re-asserting blind")
+                verify = False
+        for key, d in live:
+            if verify and d.active_mode == d.direct_mode_index():
+                continue
+            was = d.active_mode_name()
+            try:
+                mode = self.orgb.set_direct(d)
+            except Exception as e:
+                self.log(f"{key}: mode refresh failed: {type(e).__name__}: {e}")
+                continue
+            d.active_mode = d.direct_mode_index()
+            if verify:
+                self.log(f"{key}: found in {was} - back to {mode}")
+            # the switch leaves the controller showing the mode's own default
+            # until a colour frame arrives; send the last one now rather than
+            # waiting out the rest of the tick
+            last = self._orgb_last.get(key)
+            if last:
+                try:
+                    self.orgb.update_leds(d, last)
+                    self._orgb_sent[key] = time.time()
+                except Exception:
+                    pass
 
     def _atexit(self):
         try:
@@ -488,6 +545,30 @@ class Engine:
         self.preview[key] = cols
         return cols
 
+    def _push_orgb(self, key, dev, colors):
+        """update_leds, rate-limited, skipping frames the device already holds.
+
+        The HID drivers have done this since day one (hidlib.StreamDevice); the
+        SDK path had no limit at all, so "fps": 60 meant 60 UPDATELEDS a second
+        per device even on a still screen. The motherboard's Aura controller sits
+        behind SMBus and the mouse is shared with Synapse; neither keeps up with
+        that, and what comes out the other end is the random flicker.
+
+        Direct mode holds the last frame, so unchanged frames are safe to drop -
+        with the same periodic re-send the HID devices use, in case a write is
+        ever lost.
+        """
+        now = time.time()
+        hz = CFG.get("orgb_hz", 30)
+        if hz and (now - self._orgb_sent[key]) < 1.0 / hz:
+            return
+        if (colors == self._orgb_last[key]
+                and (now - self._orgb_sent[key]) < self.ORGB_REFRESH_SEC):
+            return
+        self._orgb_last[key] = list(colors)
+        self._orgb_sent[key] = now
+        self.orgb.update_leds(dev, colors)
+
     def _guard(self, key, fn):
         """Run one device's update; isolate it so a failure can't kill the loop."""
         try:
@@ -525,9 +606,9 @@ class Engine:
         for key in ORGB_KEYS:
             d = self.dev(key)
             if d and self.on(key):
-                self._guard(key, lambda d=d, k=key: self.orgb.update_leds(d, self._colors(raw, k)))
+                self._guard(key, lambda d=d, k=key: self._push_orgb(k, d, self._colors(raw, k)))
 
-        if self.kbd_hid and self.on("kbd"):
+        if self.kbd_hid and self.kbd is None and self.on("kbd"):
             self._guard("kbd", lambda: self.kbd_hid.set_colors(self._colors(raw, "kbd")))
 
         if self.monitor and self.on("monitor") and \
@@ -590,6 +671,8 @@ class Engine:
             d = self.dev(key)
             if d:
                 d.fill(0, 0, 0)
+        if key in ORGB_KEYS:
+            self._orgb_last[key] = None      # don't skip the first frame back
         sm = self.sm.get(key)
         if sm:
             sm.reset()
@@ -660,6 +743,9 @@ class Engine:
     def blackout(self):
         for sm in getattr(self, "sm", {}).values():
             sm.reset()
+        last = getattr(self, "_orgb_last", {})
+        for k in last:                       # else the first frame back, if it
+            last[k] = None                   # matches, is skipped as unchanged
         for key in ORGB_KEYS:
             d = self.dev(key)
             if d and self.orgb:

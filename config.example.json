@@ -15,6 +15,8 @@
   "brightness": 1.0,
   "black_floor": 6,
   "monitor_hz": 30,
+  "orgb_hz": 30,
+  "mode_verify": true,
   "mode_refresh_sec": 5,
   "rescan_sec": 20,
   "kbd_brightness": 16,

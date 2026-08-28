@@ -139,6 +139,19 @@ class OpenRGBClient:
                 return d.active_mode_name()
         return None
 
+    def sync_active_modes(self, devs):
+        """Update active_mode in place on every device in `devs`.
+
+        One enumeration for the whole list, unlike read_active_mode()'s one per
+        device: this runs on a timer with the frame loop waiting behind it.
+        """
+        fresh = {d.index: d for d in self._enumerate()}
+        for d in devs:
+            f = fresh.get(d.index)
+            if f is not None and f.name == d.name:
+                d.active_mode = f.active_mode
+        return devs
+
     # -------------------------------------------------------------- control --
     def find(self, *keywords):
         for d in self.devices:
