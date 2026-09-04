@@ -1,8 +1,15 @@
-"""Screen capture via GDI StretchBlt -> small RGB grid. No dependencies.
+"""Screen capture -> small RGB grid. No dependencies.
 
-The grab costs ~12.5ms regardless of grid size (it reads back from the GPU),
-so CaptureThread runs it on its own thread and publishes the latest frame.
-That lets device writes overlap with capture instead of queueing behind it.
+CaptureThread is the entry point. It prefers DXGI Desktop Duplication (dxgi.py)
+and keeps the GDI StretchBlt path below as the fallback.
+
+The GDI grab costs ~17.5ms of CPU regardless of grid size - the price is reading
+the desktop framebuffer back off the GPU, not the resampling - so it cannot be
+made cheap by asking for a smaller grid. Worse, reading the screen DC in a loop
+keeps DWM compositing and drops fullscreen games off the independent-flip path.
+Duplication costs ~0.13ms a frame and nothing on a still screen. Both run on
+their own thread so device writes overlap with capture rather than queueing
+behind it.
 """
 import ctypes, threading, time
 from ctypes import wintypes
@@ -165,48 +172,123 @@ class ScreenGrabber:
 class CaptureThread(threading.Thread):
     """Grabs continuously; `latest()` returns the most recent frame.
 
-    The grabber is created inside run() so its GDI objects belong to this thread.
+    Two backends. DXGI Desktop Duplication (dxgi.py) is the one you want: it
+    blocks until the desktop actually changes and downsamples on the GPU, so it
+    costs ~0.13ms of CPU per frame and nothing at all on a still screen. GDI
+    (ScreenGrabber, above) is the fallback for machines where duplication is
+    unavailable - it costs ~5.5ms of CPU per grab and, because it reads the
+    desktop framebuffer back, forces DWM to keep compositing, which is what
+    makes a fullscreen game feel like it dropped to a fraction of its refresh
+    rate while still reporting a high frame count.
+
+    The grabber is created inside run() so its objects belong to this thread.
+
+    DXGI hands back a mip level rather than an arbitrary size, so the grid you
+    get is the smallest power-of-two reduction at least as fine as the one you
+    asked for - 48x27 on a 1080p desktop comes back as 60x33. Wait on
+    wait_grid() and read `cols`/`rows` back off the thread before sizing
+    anything against them.
     """
 
-    def __init__(self, cols=48, rows=27, max_fps=120):
+    def __init__(self, cols=48, rows=27, max_fps=60, backend="auto"):
         super().__init__(daemon=True)
         self.cols, self.rows = cols, rows
+        self.want = (cols, rows)
         self.max_fps = max_fps
-        self._raw = None
+        self.backend = backend          # "auto" | "dxgi" | "gdi"
+        self.backend_used = None
+        self.dxgi_error = None
+        self._frame = None              # (raw, cols, rows), published together
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._ready = threading.Event()
+        self._grid = threading.Event()
         self.fps = 0.0
         self.screen_size = (0, 0)
 
+    def _open(self):
+        """Pick a backend. Returns (grabber, is_dxgi)."""
+        if self.backend != "gdi":
+            try:
+                import dxgi
+                g = dxgi.DuplicationGrabber(*self.want)
+                return g, True
+            except Exception as e:
+                if self.backend == "dxgi":
+                    raise
+                self.dxgi_error = f"{type(e).__name__}: {e}"
+        return ScreenGrabber(*self.want), False
+
+    def _prime(self, cols, rows):
+        """One GDI grab so there is a frame before the desktop first changes.
+
+        Duplication only reports changes, and a desktop that is genuinely still
+        at startup produces none - without this the lights would sit dark until
+        something moved on screen.
+        """
+        g = ScreenGrabber(cols, rows)
+        try:
+            return g.grab()
+        finally:
+            g.close()
+
     def run(self):
-        g = ScreenGrabber(self.cols, self.rows)
+        g, is_dxgi = self._open()
+        self.cols, self.rows = g.cols, g.rows
         self.screen_size = (g.sw, g.sh)
+        self.backend_used = "dxgi" if is_dxgi else "gdi"
+        self._grid.set()
         n, t0 = 0, time.perf_counter()
         try:
+            if is_dxgi:
+                try:
+                    self._publish(self._prime(g.cols, g.rows), g.cols, g.rows)
+                except Exception:
+                    pass
             while not self._stop.is_set():
                 t = time.perf_counter()
                 try:
-                    raw = g.grab()
+                    # DXGI blocks here until the screen changes; the timeout is
+                    # only so the loop notices _stop.
+                    raw = g.grab(200) if is_dxgi else g.grab()
                 except Exception:
                     time.sleep(0.2)
                     continue
-                with self._lock:
-                    self._raw = raw
-                self._ready.set()
+                if raw is None:             # DXGI: nothing changed, keep the last
+                    continue
+                # a mode change resizes the grid under us, so republish it with
+                # every frame rather than letting the two drift apart
+                self.cols, self.rows = g.cols, g.rows
+                self.screen_size = (g.sw, g.sh)
+                self._publish(raw, g.cols, g.rows)
                 n += 1
                 if n >= 20:
                     el = time.perf_counter() - t0
                     self.fps = n / el if el else 0.0
                     n, t0 = 0, time.perf_counter()
                 dt = time.perf_counter() - t
-                time.sleep(max(0.0, 1.0 / self.max_fps - dt))
+                time.sleep(max(0.0, 1.0 / max(1, self.max_fps) - dt))
         finally:
             g.close()
 
-    def latest(self):
+    def _publish(self, raw, cols, rows):
         with self._lock:
-            return self._raw
+            self._frame = (raw, cols, rows)
+        self._ready.set()
+
+    def latest(self):
+        """The newest (raw, cols, rows), or None before the first frame.
+
+        The grid travels with the frame because a display mode change resizes
+        it mid-run - reading `cols`/`rows` off the thread separately can catch
+        the pair mid-swap.
+        """
+        with self._lock:
+            return self._frame
+
+    def wait_grid(self, timeout=3.0):
+        """Block until cols/rows/screen_size reflect the backend that opened."""
+        return self._grid.wait(timeout)
 
     def wait_ready(self, timeout=3.0):
         return self._ready.wait(timeout)

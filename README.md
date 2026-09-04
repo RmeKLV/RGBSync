@@ -43,12 +43,24 @@ Both of these look identical from software — the device reports success and si
   timer shows up as a periodic blip on every device.
 - **A device disappears or shows up late.** Missing devices are retried on a background timer, so
   plugging something in — or starting OpenRGB after the app — no longer means restarting anything.
+- **The mouse goes dark on its own.** Synapse pulls the DeathAdder out of direct mode without
+  going through OpenRGB, so OpenRGB still reports it as being in Direct and a readback cannot
+  catch it. Devices listed in `mode_reassert` are switched back blind every `mode_reassert_sec`
+  and repainted immediately, so they come back by themselves instead of needing a restart.
+- **Games feel like they dropped to a fraction of the monitor's refresh.** That was the old GDI
+  capture path: reading the screen DC costs ~17 ms a grab and keeps DWM compositing, which knocks
+  a fullscreen game off independent flip — the frame counter stays high while the game stops
+  feeling smooth. Capture now goes through DXGI Desktop Duplication, which is event-driven and
+  downscales on the GPU (~40× less CPU, and nothing at all on a still screen). Set
+  `"capture": "gdi"` to go back.
 
 ## Architecture
 
 ```
-screen.py     CaptureThread + Sampler — GDI screen capture on its own thread
+screen.py     CaptureThread + Sampler — screen capture on its own thread
    |            (decoupled so slow USB writes never stall the capture loop)
+   +--> dxgi.py       DXGI Desktop Duplication — GPU downscale, event-driven;
+   |                  screen.ScreenGrabber (GDI) is the fallback
    v
 ambient.py    Engine — per-device colour pipeline, timers, device lifecycle
    |            saturation / gamma / brightness / per-channel gain, per device
@@ -107,8 +119,10 @@ The interesting keys:
 
 | Key | Meaning |
 |---|---|
-| `fps` | capture rate |
-| `grid` | sampling grid resolution |
+| `fps` | frame-loop rate |
+| `grid` | minimum sampling grid; DXGI rounds it up to a mip level (48×27 → 60×33 on 1080p) |
+| `capture` | `auto` \| `dxgi` \| `gdi` — capture backend |
+| `capture_hz` | cap on captures per second; `0` follows `fps` |
 | `regions` | per-device screen rectangle + sampling axis (`x`, `y`, `avg`, `grid`) |
 | `device` | per-device saturation, gamma, brightness, RGB gain |
 | `orgb_hz` | cap on colour writes per second per OpenRGB device (the HID drivers have their own) |
@@ -117,6 +131,8 @@ The interesting keys:
 | `rescan_sec` | how often to retry missing devices |
 | `mode_refresh_sec` | how often to check that devices are still in direct mode |
 | `mode_verify` | read the current mode before re-asserting it; `false` re-asserts blind |
+| `mode_reassert` | devices to put back into direct mode blind — `mode_verify` cannot see a steal that bypassed OpenRGB |
+| `mode_reassert_sec` | how often that blind re-assert runs |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.
 

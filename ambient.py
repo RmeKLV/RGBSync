@@ -17,7 +17,9 @@ device can stop responding without anything reporting an error:
     profile; OpenRGB keeps accepting colour writes afterwards and returns
     success, so the device reads as healthy while sitting unlit. The check
     matters: UPDATEMODE is a real mode switch on the hardware, so re-sending it
-    unconditionally is a visible blip every few seconds.
+    unconditionally is a visible blip every few seconds. It only catches half
+    the problem, though - see _reassert_modes for the other half, which is the
+    Razer mouse going dark.
   * Missing devices are retried. Plugging something in, or starting OpenRGB
     late, no longer means restarting the app.
 
@@ -69,7 +71,19 @@ DEFAULTS = {
     "fps":        45,
     "quality":    "vivid",     # "mean" | "linear" | "vivid" - see screen.Sampler
     "vividness":  4.0,
-    "grid":       [48, 27],    # capture grid; costs ~nothing until regions get small
+    "grid":       [48, 27],    # capture grid; costs ~nothing until regions get small.
+                               # A minimum, not an exact size - DXGI rounds it up
+                               # to a mip level (48x27 on 1080p becomes 60x33).
+    "capture":    "auto",      # "auto" | "dxgi" | "gdi". DXGI Desktop Duplication
+                               # is ~40x cheaper than the GDI screen-DC readback
+                               # and, unlike it, does not force DWM to composite -
+                               # which is what made fullscreen games feel like they
+                               # had dropped to a fraction of the monitor's refresh
+                               # while still reporting a high frame count.
+                               # "gdi" forces the old path back.
+    "capture_hz": 0,           # cap on captures per second; 0 = follow "fps".
+                               # Capturing faster than the frame loop consumes is
+                               # pure waste - the old default ran at 120.
     "letterbox":  False,       # crop black bars in films (heuristic - see letterbox.py)
     "pause_on_lock": True,     # blackout while the session is locked
     "idle_timeout": 0,         # seconds of no input before blackout; 0 = never
@@ -89,9 +103,19 @@ DEFAULTS = {
                                # hardware, so an unconditional re-assert blips every
                                # device every mode_refresh_sec. False re-asserts
                                # blind, the way this used to.
-    "mode_refresh_sec": 5,     # re-assert Direct mode this often; 0 = never.
+    "mode_refresh_sec": 5,     # check for strays this often; 0 = never.
                                # Vendor software (Synapse) steals devices back
                                # out of Direct and OpenRGB reports no error.
+    "mode_reassert": ["mouse"],  # devices to put back into Direct blind, without
+                               # asking first. mode_verify cannot see a steal that
+                               # never went through OpenRGB - which is the only
+                               # kind Synapse does - so anything it holds needs
+                               # this instead. [] disables it.
+    "mode_reassert_sec": 30,   # how often the blind re-assert runs. It is a real
+                               # mode switch on the hardware, so this is kept well
+                               # apart from mode_refresh_sec; the last frame is
+                               # repainted immediately after so the switch is at
+                               # most a single frame dark. 0 = never.
     "rescan_sec": 20,          # re-look for missing devices this often; 0 = never
     "kbd_brightness": 16,      # Apex 3 TKL master level, 0-16, when driven by HID
     "enabled": {k: True for k in DEVICE_KEYS},
@@ -258,19 +282,29 @@ class Engine:
         self._last_session_check = 0.0
 
         grid = CFG.get("grid") or [GRID_C, GRID_R]
-        self.C, self.R = int(grid[0]), int(grid[1])
+        # DXGI hands back a mip level, so the grid we get is the smallest
+        # power-of-two reduction at least as fine as the one we asked for.
+        # Everything downstream is in fractions of the grid, so adopting the
+        # real one costs nothing - but it has to be read back before the
+        # Sampler and the Letterbox are sized against it.
+        self.cap = CaptureThread(int(grid[0]), int(grid[1]),
+                                 max_fps=CFG.get("capture_hz") or CFG.get("fps", 45),
+                                 backend=CFG.get("capture", "auto"))
+        self.cap.start()
+        self.cap.wait_grid(5.0)
+        self.C, self.R = self.cap.cols, self.cap.rows
         self.grab = Sampler(self.C, self.R, CFG.get("quality", "vivid"),
                             CFG.get("vividness", 4.0))
         self.letterbox = Letterbox(self.C, self.R)
         self.content = (0, 0, self.C, self.R)
-        self.cap = CaptureThread(self.C, self.R)
-        self.cap.start()
+        if self.cap.dxgi_error:
+            self.log(f"capture : DXGI unavailable ({self.cap.dxgi_error}) - using GDI")
         if not self.cap.wait_ready(3.0):
             self.log("WARNING: no screen frame yet")
         else:
             w, h = self.cap.screen_size
             self.log(f"capture : {w}x{h} -> {self.C}x{self.R} "
-                     f"({CFG.get('quality', 'vivid')})")
+                     f"({self.cap.backend_used}, {CFG.get('quality', 'vivid')})")
 
         # OpenRGB is optional: the monitor, the keyboard and both Fifine devices
         # are driven over raw HID and work fine without it.
@@ -300,6 +334,7 @@ class Engine:
         self._orgb_sent = {k: 0.0 for k in ORGB_KEYS}    # when we sent it
         self._last_mon = 0.0
         self._last_mode_refresh = time.time()
+        self._last_reassert = time.time()
         self._last_rescan = time.time()
         missing = [k for k in DEVICE_KEYS if not self.found.get(k)]
         if missing:
@@ -431,25 +466,85 @@ class Engine:
         guaranteed blip on every device every few seconds - on a static screen
         as much as a moving one. Ask what mode it is in first, and only pay for
         the switch when the answer is wrong.
+
+        Asking, though, only works when the steal went through OpenRGB, and the
+        one that matters here does not. _reassert_modes runs on its own slower
+        timer for the devices that need switching blind.
         """
         every = CFG.get("mode_refresh_sec", 5)
-        if not every:
-            return
-        if time.time() - self._last_mode_refresh < every:
-            return
-        self._last_mode_refresh = time.time()
-        if self.orgb:
-            self._repair_modes()
-        # the keyboard's own brightness is moved by Fn+F11/F12, so re-assert it
-        if self.kbd_hid and self.kbd is None and self.on("kbd"):
+        if every and time.time() - self._last_mode_refresh >= every:
+            self._last_mode_refresh = time.time()
+            if self.orgb:
+                self._repair_modes()
+            # the keyboard's own brightness is moved by Fn+F11/F12, so re-assert it
+            if self.kbd_hid and self.kbd is None and self.on("kbd"):
+                try:
+                    self.kbd_hid.brightness = None
+                    self.kbd_hid.set_brightness(CFG.get("kbd_brightness", 16))
+                except Exception:
+                    pass
+
+        every = CFG.get("mode_reassert_sec", 30)
+        if every and self.orgb and time.time() - self._last_reassert >= every:
+            self._last_reassert = time.time()
+            self._reassert_modes()
+
+    def _reassert_modes(self):
+        """Put the devices vendor software steals back into Direct, blind.
+
+        _repair_modes cannot catch the case this exists for. `active_mode` in a
+        CONTROLLER_DATA reply is OpenRGB's own record of the last mode it was
+        asked for - it is not read back off the hardware. Synapse does not go
+        through OpenRGB when it grabs the mouse, so OpenRGB still believes the
+        device is in Direct, sync_active_modes agrees, and the verify pass skips
+        the one device that actually needs fixing. That is the mouse going dark
+        and staying dark until the app is restarted.
+
+        So for those devices, do not ask - switch. The cost of an unnecessary
+        mode switch is one frame of the mode's own default, and the repaint
+        below closes even that, which is why this can run on a timer where an
+        unconditional re-assert of everything could not.
+        """
+        keys = CFG.get("mode_reassert") or []
+        for key in keys:
+            if key not in ORGB_KEYS:
+                continue
+            d = self.dev(key)
+            if d and self.on(key):
+                self._force_direct(key, d)
+
+    def _force_direct(self, key, dev, note=None):
+        """UPDATEMODE to Direct, then immediately repaint the last frame.
+
+        The switch leaves the controller showing the mode's own default until a
+        colour frame arrives, and _push_orgb would otherwise skip that frame as
+        unchanged for up to ORGB_REFRESH_SEC. Repaint here instead of waiting.
+        """
+        i = dev.direct_mode_index()
+        if i is None:                    # no per-LED mode; nothing to assert
+            return False
+        try:
+            mode = self.orgb.set_direct(dev)
+        except Exception as e:
+            self.log(f"{key}: mode refresh failed: {type(e).__name__}: {e}")
+            return False
+        dev.active_mode = i
+        if note:
+            self.log(note.format(mode=mode))
+        last = self._orgb_last.get(key)
+        if last:
             try:
-                self.kbd_hid.brightness = None
-                self.kbd_hid.set_brightness(CFG.get("kbd_brightness", 16))
+                self.orgb.update_leds(dev, last)
+                self._orgb_sent[key] = time.time()
             except Exception:
                 pass
+        return True
 
     def _repair_modes(self):
-        """One readback for every SDK device; re-assert Direct on the strays."""
+        """One readback for every SDK device; re-assert Direct on the strays.
+
+        Only sees steals that went through OpenRGB - see _reassert_modes.
+        """
         live = [(k, self.dev(k)) for k in ORGB_KEYS if self.dev(k) and self.on(k)]
         if not live:
             return
@@ -467,24 +562,8 @@ class Engine:
             if verify and d.active_mode == d.direct_mode_index():
                 continue
             was = d.active_mode_name()
-            try:
-                mode = self.orgb.set_direct(d)
-            except Exception as e:
-                self.log(f"{key}: mode refresh failed: {type(e).__name__}: {e}")
-                continue
-            d.active_mode = d.direct_mode_index()
-            if verify:
-                self.log(f"{key}: found in {was} - back to {mode}")
-            # the switch leaves the controller showing the mode's own default
-            # until a colour frame arrives; send the last one now rather than
-            # waiting out the rest of the tick
-            last = self._orgb_last.get(key)
-            if last:
-                try:
-                    self.orgb.update_leds(d, last)
-                    self._orgb_sent[key] = time.time()
-                except Exception:
-                    pass
+            self._force_direct(key, d,
+                               f"{key}: found in {was} - back to {{mode}}" if verify else None)
 
     def _atexit(self):
         try:
@@ -584,10 +663,13 @@ class Engine:
                 self.log(f"{key}: disabled after {self.MAX_FAULTS} failures")
 
     def frame(self):
-        raw = self.cap.latest()
-        if raw is None:
+        frame = self.cap.latest()
+        if frame is None:
             time.sleep(0.01)
             return
+        raw, cols, rows = frame
+        if (cols, rows) != (self.C, self.R):
+            self._resize_grid(cols, rows)
         self.last_raw = raw
 
         if CFG.get("letterbox"):
@@ -620,6 +702,21 @@ class Engine:
             d = self.dev(key)
             if d and self.on(key):
                 self._guard(key, lambda d=d, k=key: d.set_colors(self._colors(raw, k)))
+
+    def _resize_grid(self, cols, rows):
+        """Follow a capture grid that changed size under us.
+
+        A game taking exclusive fullscreen at a different resolution moves the
+        display mode, which moves the mip level DXGI hands back. Regions are all
+        fractions of the grid so they need no adjustment, but anything sized in
+        cells does.
+        """
+        self.log(f"capture : grid {self.C}x{self.R} -> {cols}x{rows}")
+        self.C, self.R = cols, rows
+        self.grab = Sampler(cols, rows, CFG.get("quality", "vivid"),
+                            CFG.get("vividness", 4.0))
+        self.letterbox = Letterbox(cols, rows)
+        self.content = (0, 0, cols, rows)
 
     def run(self):
         self.running = True

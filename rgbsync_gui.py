@@ -391,12 +391,17 @@ class App:
             self.stat.config(text=f"paused ({eng.pause_reason})", foreground=MUTED)
         elif running:
             cap = getattr(eng.cap, "fps", 0.0)
+            # On DXGI this counts frames the desktop actually produced, so it
+            # sits near zero on a still screen - that is the point of it, not a
+            # stall. Name the backend so the number reads right.
+            back = getattr(eng.cap, "backend_used", None) or "?"
             extra = ""
             lb = getattr(eng, "letterbox", None)
             if lb is not None and lb.active:
                 extra = "   cropped"
             self.stat.config(text=f"running   {eng.fps_actual:4.1f} fps   "
-                                  f"capture {cap:4.1f}   worst {eng.worst_ms:.0f} ms{extra}",
+                                  f"capture {cap:4.1f} ({back})   "
+                                  f"worst {eng.worst_ms:.0f} ms{extra}",
                              foreground=OK)
         elif self.starting:
             self.stat.config(text="starting...", foreground=MUTED)

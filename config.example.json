@@ -6,6 +6,8 @@
     48,
     27
   ],
+  "capture": "auto",
+  "capture_hz": 0,
   "letterbox": true,
   "pause_on_lock": true,
   "idle_timeout": 0,
@@ -18,6 +20,10 @@
   "orgb_hz": 30,
   "mode_verify": true,
   "mode_refresh_sec": 5,
+  "mode_reassert": [
+    "mouse"
+  ],
+  "mode_reassert_sec": 30,
   "rescan_sec": 20,
   "kbd_brightness": 16,
   "enabled": {
