@@ -80,7 +80,7 @@ class Sampler:
         lr = [0] * n; lg = [0] * n; lb = [0] * n
         L = TO_LINEAR
         k = self.vividness if self.mode == "vivid" else 0.0
-        w = [1.0] * n if not k else [0.0] * n
+        w = [1.0] * n
         for i in range(n):
             j = i << 2
             b = raw[j]; g = raw[j + 1]; r = raw[j + 2]
@@ -90,7 +90,11 @@ class Sampler:
                 if b > mx: mx = b
                 mn = r if r < g else g
                 if b < mn: mn = b
-                w[i] = 1.0 + k * ((mx - mn) / mx) if mx else 1.0
+                # HSV saturation alone rates (3,1,1) as 67% saturated, so
+                # near-black capture noise outvoted real colour in dark
+                # scenes. Fade the boost in over the bottom quarter.
+                if mx:
+                    w[i] = 1.0 + k * ((mx - mn) / mx) * (mx / 64.0 if mx < 64 else 1.0)
         self._lr, self._lg, self._lb, self._w = lr, lg, lb, w
 
     def region(self, raw, x0, y0, x1, y1):

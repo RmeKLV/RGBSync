@@ -20,10 +20,14 @@
   "mode_refresh_sec": 5,
   "rescan_sec": 20,
   "kbd_brightness": 16,
+  "hue_correct": true,
+  "pause_on_display_off": true,
+  "dark_when_stopped": true,
+  "config_version": 2,
   "enabled": {
     "mobo": true,
     "kbd": true,
-    "mouse": true,
+    "mouse": false,
     "monitor": true,
     "bm38": true,
     "am8": true
@@ -31,7 +35,7 @@
   "device": {
     "mobo": {
       "link": false,
-      "saturation": 1.195,
+      "saturation": 1.0,
       "gamma": 0.853,
       "brightness": 1.0,
       "gain": [
@@ -42,7 +46,7 @@
     },
     "kbd": {
       "link": false,
-      "saturation": 2.059,
+      "saturation": 1.287,
       "gamma": 0.847,
       "brightness": 1.0,
       "gain": [
@@ -53,7 +57,7 @@
     },
     "mouse": {
       "link": false,
-      "saturation": 1.729,
+      "saturation": 1.081,
       "gamma": 0.853,
       "brightness": 1.0,
       "gain": [
@@ -64,7 +68,7 @@
     },
     "monitor": {
       "link": false,
-      "saturation": 1.398,
+      "saturation": 1.0,
       "gamma": 0.853,
       "brightness": 1.0,
       "gain": [
@@ -75,7 +79,7 @@
     },
     "bm38": {
       "link": false,
-      "saturation": 1.576,
+      "saturation": 1.0,
       "gamma": 0.854,
       "brightness": 0.496,
       "gain": [
@@ -86,7 +90,7 @@
     },
     "am8": {
       "link": false,
-      "saturation": 1.551,
+      "saturation": 1.0,
       "gamma": 0.847,
       "brightness": 0.305,
       "gain": [

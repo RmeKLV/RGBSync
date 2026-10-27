@@ -77,7 +77,7 @@ class App:
 
         root.title("RGB Screen Sync")
         root.configure(bg=BG)
-        root.geometry("580x810")
+        root.geometry("580x920")
         root.minsize(520, 640)
 
         apply_theme(root)
@@ -167,6 +167,19 @@ class App:
                            highlightthickness=0, bd=0,
                            font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
         self._slider(card, "vividness", "Vividness", 0.0, 10.0, is_int=False)
+        hv = tk.BooleanVar(value=CFG.get("hue_correct", True))
+        tk.Checkbutton(card, text="True-to-screen hues", variable=hv,
+                       command=lambda: CFG.__setitem__("hue_correct", hv.get()),
+                       bg=PANEL, fg=FG, selectcolor=ACCENT,
+                       activebackground=PANEL, activeforeground=FG,
+                       highlightthickness=0, bd=0,
+                       font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
+        ttk.Label(card, style="Card.TLabel", foreground=MUTED, font=("Segoe UI", 8),
+                  justify="left",
+                  text=("LEDs are linear, screens are not: without this, mixed colours\n"
+                        "come out pale and shifted (orange reads yellow). Needs less\n"
+                        "saturation than before - about 1.0-1.3 looks right.")
+                  ).pack(anchor="w", padx=(22, 0))
         self.q_hint = ttk.Label(card, justify="left", style="Card.TLabel",
                                 foreground=MUTED, font=("Segoe UI", 8), text="")
         self.q_hint.pack(anchor="w", pady=(6, 0))
@@ -207,6 +220,16 @@ class App:
             card, "Pause while locked", lambda: CFG.get("pause_on_lock", True),
             lambda on: CFG.__setitem__("pause_on_lock", on),
             "Lights off on the lock screen, back on when you sign in.")
+        check(card, "Pause while the display is off",
+              lambda: CFG.get("pause_on_display_off", True),
+              lambda on: CFG.__setitem__("pause_on_display_off", on),
+              "Lights off when Windows turns the monitor off. Shutdown and sleep\n"
+              "always black everything out first.")
+        check(card, "Keep lights dark when stopped",
+              lambda: CFG.get("dark_when_stopped", True),
+              lambda on: CFG.__setitem__("dark_when_stopped", on),
+              "Stop holds every device black. Off: Stop lets go, and the mic and\n"
+              "arm go back to their own rainbow effect.")
         self.var_letterbox = check(
             card, "Crop black bars in films", lambda: CFG.get("letterbox", False),
             lambda on: CFG.__setitem__("letterbox", on),
@@ -297,7 +320,7 @@ class App:
             try:
                 gained = eng.rescan()
                 if not gained:
-                    missing = [k for k in ambient.DEVICE_KEYS if not eng.found.get(k)]
+                    missing = eng.missing()
                     self.write("rescan: nothing new"
                                + (f" - still missing: {', '.join(missing)}" if missing
                                   else " - everything is already connected"))
@@ -319,8 +342,16 @@ class App:
                 eng.blackout_key(key)
             except Exception:
                 pass
+        elif eng and not eng.found.get(key):
+            # disabled devices are never looked for, so look now
+            self.rescan()
 
     def start(self):
+        eng = self.engine
+        if eng and eng.held:
+            eng.hold(False)
+            self.write("--- resumed ---")
+            return
         if self.thread and self.thread.is_alive():
             return
         self.starting = True
@@ -357,8 +388,12 @@ class App:
         self.thread.start()
 
     def stop(self):
-        if self.engine:
-            self.engine.stop()
+        eng = self.engine
+        if eng and CFG.get("dark_when_stopped", True):
+            eng.hold(True)
+            self.write("--- stopped (holding lights dark) ---")
+        elif eng:
+            eng.stop()
         self.btn_stop.config(state="disabled")
 
     def _set_autostart(self, on):
@@ -381,13 +416,17 @@ class App:
     def _tick(self):
         eng = self.engine
         alive = bool(self.thread and self.thread.is_alive())
-        running = bool(eng and eng.running)
+        held = bool(eng and eng.running and eng.held)
+        running = bool(eng and eng.running) and not held
 
-        self.btn_start.config(state="disabled" if (alive or self.starting) else "normal")
+        self.btn_start.config(state="normal" if held or not (alive or self.starting)
+                              else "disabled")
         self.btn_stop.config(state="normal" if running else "disabled")
         self.btn_rescan.config(state="normal" if running else "disabled")
 
-        if running and getattr(eng, "paused", False):
+        if held:
+            self.stat.config(text="stopped - holding lights dark", foreground=MUTED)
+        elif running and getattr(eng, "paused", False):
             self.stat.config(text=f"paused ({eng.pause_reason})", foreground=MUTED)
         elif running:
             cap = getattr(eng.cap, "fps", 0.0)
@@ -409,7 +448,9 @@ class App:
             lab = self.dev_labels[key]
             if eng:
                 found = eng.found.get(key)
-                if found:
+                if not CFG["enabled"].get(key, True):
+                    lab.config(text="off", foreground=MUTED)
+                elif found:
                     txt = found if len(found) <= 30 else found[:29] + "\u2026"
                     lab.config(text=txt, foreground=MUTED)
                 else:

@@ -1,6 +1,7 @@
 """Screen-ambient sync engine.
 
-  OpenRGB SDK  -> motherboard, Razer DeathAdder V2
+  OpenRGB SDK  -> motherboard (and an RGB mouse, if there is one - off by
+                  default: the Razer Viper on this desk has no LEDs to drive)
   direct HID   -> SteelSeries Apex 3 TKL, ASUS XG248Q backlight,
                   Fifine BM38 arm, Fifine AM8 Pro mic
 
@@ -26,10 +27,18 @@ visually with rgbsync_gui.py -> "Screen layout".
 
 Capture runs on its own thread so device writes overlap with it rather than
 queueing behind it.
-"""
-import time, sys, json, os, signal, atexit
 
-from screen import CaptureThread, Sampler
+Staying dark. The Fifine pair only show our colours while a stream of frames
+keeps arriving; the moment it stops they fall back to their onboard effect. So
+"off" has to be an active state, not the absence of writes: while paused
+(locked, display asleep, or Stop pressed) the engine keeps streaming black.
+Shutdown and sleep are caught by power.PowerWatcher and blacked out before
+Windows carries on. What happens after the process is gone is down to the
+hardware - see the README's "Dark when the PC is off".
+"""
+import time, sys, json, os, signal, atexit, shutil, threading
+
+from screen import CaptureThread, Sampler, _srgb_to_linear
 from orgb import OpenRGBClient
 from xg248q import XG248Q
 from fifine import BM38, AM8Pro
@@ -94,7 +103,13 @@ DEFAULTS = {
                                # out of Direct and OpenRGB reports no error.
     "rescan_sec": 20,          # re-look for missing devices this often; 0 = never
     "kbd_brightness": 16,      # Apex 3 TKL master level, 0-16, when driven by HID
-    "enabled": {k: True for k in DEVICE_KEYS},
+    "hue_correct": True,       # mix LED colours in linear light - see grade()
+    "pause_on_display_off": True,  # blackout while Windows has the monitor off
+    "dark_when_stopped": True, # Stop keeps streaming black instead of letting go;
+                               # otherwise the mic and arm fall back to their own
+                               # rainbow the moment the stream ends
+    "config_version": 2,
+    "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},
     "device":  json.loads(json.dumps(DEFAULT_DEVICE)),
     "regions": json.loads(json.dumps(DEFAULT_REGIONS)),
 }
@@ -106,6 +121,39 @@ AM8_POSITIONS = [(0, 1), (0, 0), (0, 0), (2, 0), (5, 0), (5, 0),
 
 ORGB_KEYS = ("mobo", "kbd", "mouse")
 HID_KEYS = ("monitor", "bm38", "am8")
+
+
+# Old saturation settings were compensating for LEDs being fed sRGB values, which
+# washes mixed colours out. hue_correct fixes that at the source, so carried-over
+# saturation would land roughly this much too strong - see _migrate().
+HUE_CORRECT_SAT_FACTOR = 1.6
+
+
+def _migrate(saved):
+    """Bring a config written by an older version up to config_version 2.
+
+    Runs after the saved values are loaded into CFG. The file on disk is copied
+    to config.v1.json first, so nothing tuned by hand is lost.
+    """
+    ver = saved.get("config_version", 1)
+    if ver >= 2:
+        return
+    try:
+        shutil.copyfile(CONFIG_PATH, CONFIG_PATH[:-len(".json")] + ".v1.json")
+    except OSError:
+        pass
+    # The mouse slot was a DeathAdder V2; the Viper that replaced it has no RGB.
+    CFG["enabled"]["mouse"] = False
+    if "hue_correct" not in saved:
+        CFG["hue_correct"] = True
+        def tame(s):        # only ever reduce, never below neutral
+            return s if s <= 1.0 else round(max(1.0, s / HUE_CORRECT_SAT_FACTOR), 3)
+        CFG["saturation"] = tame(CFG["saturation"])
+        for d in CFG["device"].values():
+            if "saturation" in d:
+                d["saturation"] = tame(d["saturation"])
+    CFG["config_version"] = 2
+    print("config migrated to v2 (previous saved as config.v1.json)")
 
 
 def load_config():
@@ -129,6 +177,7 @@ def load_config():
                 CFG[k].update(v)
             elif k in CFG:
                 CFG[k] = v
+        _migrate(saved)
     except FileNotFoundError:
         pass
     except Exception as e:
@@ -184,12 +233,37 @@ def grade(c, key):
         r, g, b = (m + (v - m) * t for v in (r, g, b))
 
     grey = (r + g + b) / 3.0
+    sat = [max(0.0, min(255.0, grey + (v - grey) * s)) for v in (r, g, b)]
+    if CFG.get("hue_correct", True):
+        sat = hue_correct(sat)
     out = []
-    for v, k in zip((r, g, b), gain):
-        v = max(0.0, min(255.0, grey + (v - grey) * s))
+    for v, k in zip(sat, gain):
         v = 255.0 * (v / 255.0) ** gm
         out.append(max(0.0, min(255.0, v * br * k)))
     return tuple(out)
+
+
+def hue_correct(c):
+    """Give an LED the channel ratios the screen actually emits.
+
+    Screen values are sRGB-encoded: 128 is ~22% of full light, not 50%. LED
+    PWM is linear, so sending the byte straight through makes every mixed
+    colour's weaker channels far too strong - orange drifts to yellow, teal to
+    cyan, everything goes pastel - which is what the old high saturation
+    settings were papering over, with the hue still wrong.
+
+    Ratios come from linear light; the brightest channel keeps its sRGB level,
+    so overall brightness (and dark scenes) are unchanged. Greys and pure
+    primaries pass through untouched.
+    """
+    mx = max(c)
+    if mx <= 0.0:
+        return c
+    lin = [_srgb_to_linear(v) for v in c]
+    lmx = max(lin)
+    if lmx <= 0.0:
+        return c
+    return [mx * v / lmx for v in lin]
 
 
 def enhance(c, key):
@@ -256,6 +330,14 @@ class Engine:
         self.paused = False
         self.pause_reason = ""
         self._last_session_check = 0.0
+        self._session_reason = ""
+        # pause reasons pushed in from outside the frame loop: "shutdown",
+        # "suspend", "display off" (power.PowerWatcher) and "stopped" (hold())
+        self._ext = set()
+        self._ext_lock = threading.Lock()
+        self._need_dark = False
+        self._dark_ack = threading.Event()
+        self._thread = None
 
         grid = CFG.get("grid") or [GRID_C, GRID_R]
         self.C, self.R = int(grid[0]), int(grid[1])
@@ -301,11 +383,111 @@ class Engine:
         self._last_mon = 0.0
         self._last_mode_refresh = time.time()
         self._last_rescan = time.time()
-        missing = [k for k in DEVICE_KEYS if not self.found.get(k)]
+        missing = self.missing()
         if missing:
             self.log(f"missing : {', '.join(missing)} - retrying every "
                      f"{CFG.get('rescan_sec', 20)}s")
         atexit.register(self._atexit)
+
+        self.power = None
+        try:
+            import power
+            self.power = power.PowerWatcher(self.on_power, log=self.log)
+            self.power.start()
+            self.power.wait_ready()
+        except Exception as e:
+            self.log(f"power   : no shutdown/sleep notifications ({e})")
+
+    def missing(self):
+        """Enabled devices we have not found. A disabled one is not 'missing'."""
+        return [k for k in DEVICE_KEYS
+                if CFG["enabled"].get(k, True) and not self.found.get(k)]
+
+    # -------------------------------------------------------- staying dark --
+    def on_power(self, event):
+        """PowerWatcher callback (its own thread). Blocks until we are dark."""
+        if event == "shutdown":
+            self.log("power   : Windows is shutting down - lights off")
+            self._request_dark("shutdown")
+        elif event == "shutdown_cancelled":
+            self.log("power   : shutdown cancelled")
+            self._release("shutdown")
+        elif event == "suspend":
+            self.log("power   : going to sleep - lights off")
+            self._request_dark("suspend")
+        elif event == "resume":
+            self._release("suspend")
+        elif event == "display_off":
+            if CFG.get("pause_on_display_off", True):
+                self._request_dark("display off", wait=False)
+        elif event == "display_on":
+            self._release("display off")
+
+    def hold(self, on=True):
+        """Stop syncing but keep every device dark (the GUI's Stop button).
+
+        Letting go is not the same as off: the Fifine mic and arm fall back to
+        their onboard rainbow as soon as frames stop arriving. Held, the loop
+        keeps streaming black at them until resumed or closed.
+        """
+        if on:
+            self._request_dark("stopped", wait=False)
+        else:
+            self._release("stopped")
+
+    @property
+    def held(self):
+        return "stopped" in self._ext
+
+    def _request_dark(self, reason, wait=True, timeout=3.0):
+        with self._ext_lock:
+            self._ext.add(reason)
+            self._need_dark = True
+            self._dark_ack.clear()
+        if not wait:
+            return
+        loop = self._thread
+        if self.running and loop is not None and loop.is_alive() \
+                and loop is not threading.current_thread():
+            # the frame loop owns the device handles; let it do the blackout
+            if self._dark_ack.wait(timeout):
+                return
+        try:
+            self.blackout()
+        except Exception:
+            pass
+
+    def _release(self, reason):
+        with self._ext_lock:
+            self._ext.discard(reason)
+
+    def _ext_reason(self):
+        with self._ext_lock:
+            for r in ("shutdown", "suspend", "stopped", "display off"):
+                if r in self._ext:
+                    return r
+        return ""
+
+    def keep_dark(self):
+        """One keep-alive frame of black for everything we drive.
+
+        The HID drivers skip identical frames on their own (and the Fifine pair
+        are never skipped, which is the point); the SDK devices go through the
+        same rate limit and periodic re-send as a normal frame.
+        """
+        for key in ORGB_KEYS:
+            d = self.dev(key)
+            if d and self.orgb and self.on(key):
+                self._guard(key, lambda d=d, k=key:
+                            self._push_orgb(k, d, [(0, 0, 0)] * d.led_count))
+        if self.kbd_hid and self.kbd is None and self.on("kbd"):
+            self._guard("kbd", lambda: self.kbd_hid.set_colors(
+                [(0, 0, 0)] * Apex3TKL.LEDS))
+        for key in HID_KEYS:
+            d = self.dev(key)
+            if d and self.on(key):
+                self._guard(key, lambda d=d, k=key: d.set_colors(
+                    [(0, 0, 0)] * self.counts[k]))
 
     # ------------------------------------------------------------ discovery --
     def _connect_orgb(self, first=False):
@@ -350,6 +532,10 @@ class Engine:
                 continue
             if key == "kbd" and self.kbd_hid is not None:
                 continue        # already ours over HID; two writers = flicker
+            if not CFG["enabled"].get(key, True):
+                # don't put a device we were told to leave alone into Direct
+                self.found.setdefault(key, None)
+                continue
             d = self._find_orgb(key)
             setattr(self, key, d)
             if d:
@@ -623,11 +809,19 @@ class Engine:
 
     def run(self):
         self.running = True
+        self._thread = threading.current_thread()
         n, t0, worst = 0, time.perf_counter(), 0.0
         while self.running:
             t = time.perf_counter()
             if self._check_session():
-                time.sleep(0.5)
+                # Paused is not idle: the Fifine pair need a steady stream of
+                # black or they light back up with their own effect.
+                try:
+                    self.keep_dark()
+                except Exception as e:
+                    self.log(f"keep-dark error: {type(e).__name__}: {e}")
+                self._dark_ack.set()
+                time.sleep(0.05)
                 continue
             try:
                 self.frame()
@@ -655,7 +849,7 @@ class Engine:
             return
         if time.time() - self._last_rescan < every:
             return
-        if all(self.found.get(k) for k in DEVICE_KEYS):
+        if not self.missing():
             self._last_rescan = time.time()
             return
         self.rescan()
@@ -708,28 +902,43 @@ class Engine:
         self.log("reconnect failed - stopping")
         return False
 
-    def _check_session(self):
-        """Blackout while locked or idle. Returns True if we should skip this frame."""
-        now = time.time()
-        if now - self._last_session_check < 1.0:
-            return self.paused
-        self._last_session_check = now
+    def _poll_session(self):
+        """'locked' / 'idle' / '' from the Windows session, per the settings."""
         if not CFG.get("pause_on_lock", True) and not CFG.get("idle_timeout", 0):
-            if self.paused:
-                self.paused, self.pause_reason = False, ""
-            return False
+            return ""
         try:
-            pause, reason = session.should_pause(
-                CFG.get("idle_timeout", 0) if CFG.get("pause_on_lock", True) else 0)
-            if not CFG.get("pause_on_lock", True):
-                pause = reason == "idle" and pause
+            pause, reason = session.should_pause(CFG.get("idle_timeout", 0))
         except Exception:
-            return False
-        if pause and not self.paused:
+            return ""
+        if pause and reason == "locked" and not CFG.get("pause_on_lock", True):
+            # should_pause reports "locked" first; idle may still apply
+            idle = CFG.get("idle_timeout", 0)
+            try:
+                return "idle" if idle and session.idle_seconds() >= idle else ""
+            except Exception:
+                return ""
+        return reason if pause else ""
+
+    def _check_session(self):
+        """Blackout while locked, idle, asleep, shutting down or held.
+
+        Returns True if we should skip this frame."""
+        now = time.time()
+        if now - self._last_session_check >= 1.0:
+            self._last_session_check = now
+            self._session_reason = self._poll_session()
+        reason = self._ext_reason() or self._session_reason
+        pause = bool(reason)
+
+        if pause and (not self.paused or self._need_dark):
+            if not self.paused or reason != self.pause_reason:
+                self.log(f"paused ({reason}) - lights off")
             self.paused, self.pause_reason = True, reason
-            self.log(f"paused ({reason}) - lights off")
+            self._need_dark = False
             try: self.blackout()
             except Exception: pass
+        elif pause and reason != self.pause_reason:
+            self.pause_reason = reason
         elif not pause and self.paused:
             self.paused, self.pause_reason = False, ""
             self.log("resumed")
@@ -741,6 +950,7 @@ class Engine:
         self.running = False
 
     def blackout(self):
+        self.preview = {}
         for sm in getattr(self, "sm", {}).values():
             sm.reset()
         last = getattr(self, "_orgb_last", {})
@@ -768,6 +978,8 @@ class Engine:
                     pass
 
     def close(self):
+        if self.power:
+            self.power.stop()
         self.blackout()
         self.cap.stop()
         if self.kbd_hid:
