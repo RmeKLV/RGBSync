@@ -4,7 +4,7 @@ Design note: installing OpenRGB goes through winget (the OS package manager,
 which does its own trust checks and prompts) or the official download page.
 Nothing here silently downloads or executes a binary.
 """
-import os, sys, socket, shutil, subprocess, ctypes, glob
+import os, sys, socket, shutil, subprocess, ctypes, glob, hashlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OPENRGB_DIRS = [
@@ -17,12 +17,17 @@ WINGET_ID = "OpenRGB.OpenRGB"
 
 OK, WARN, FAIL, INFO = "ok", "warn", "fail", "info"
 
+# Matched against process image names only, case-insensitively. Keep these
+# specific: "Close it" force-kills every match, and plain "Signal" used to hit
+# the Signal messenger too.
 CONFLICTS = [
     ("fifine Genie", "Fifine Genie", "repaints the mic and boom arm 20x a second"),
-    ("Signal",       "SignalRGB",    "drives the same devices and will fight for them"),
+    ("SignalRgb",    "SignalRGB",    "drives the same devices and will fight for them"),
     ("Synapse",      "Razer Synapse", "can override the mouse lighting"),
     ("ArmouryCrate", "Armoury Crate", "can override the motherboard and monitor"),
 ]
+
+HIDAPI_SHA256 = "EBEB835E2B4530ED68843F19D6A2604C51772E3C26E7F542FDE194075F82D9B4"
 
 HID_TARGETS = [
     (0x0B05, 0x186E, "ASUS XG248Q backlight"),
@@ -65,12 +70,23 @@ def sdk_alive(timeout=0.6):
 
 
 def running_processes():
+    """Image names of every running process, e.g. ['explorer.exe', ...]."""
     try:
         out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True,
                              text=True, startupinfo=_no_window(), timeout=10).stdout
-        return out
     except Exception:
-        return ""
+        return []
+    names = []
+    for line in out.splitlines():
+        parts = [p.strip('"') for p in line.split('","')]
+        if parts and parts[0]:
+            names.append(parts[0])
+    return names
+
+
+def matching(names, image_match):
+    m = image_match.lower()
+    return sorted({n for n in names if m in n.lower()})
 
 
 def elevate(ps_command):
@@ -133,13 +149,7 @@ def fix_autostart_service():
 def make_close_fix(image_match, label):
     def _fix():
         try:
-            out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True,
-                                 text=True, startupinfo=_no_window(), timeout=10).stdout
-            names = set()
-            for line in out.splitlines():
-                parts = [p.strip('"') for p in line.split('","')]
-                if parts and image_match.lower() in parts[0].lower():
-                    names.add(parts[0])
+            names = matching(running_processes(), image_match)
             if not names:
                 return True, f"{label} is not running"
             for n in names:
@@ -174,7 +184,17 @@ def run_checks():
     local = os.path.join(HERE, "hidapi.dll")
     d = find_openrgb_dir()
     if os.path.isfile(local):
-        checks.append(Check("hidapi.dll", OK, f"bundled ({os.path.getsize(local):,} bytes)"))
+        try:
+            with open(local, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest().upper()
+        except OSError:
+            digest = ""
+        if digest == HIDAPI_SHA256:
+            checks.append(Check("hidapi.dll", OK, "bundled, verified (hidapi 0.14.0 release)"))
+        else:
+            checks.append(Check("hidapi.dll", WARN,
+                                f"bundled, but not the 0.14.0 release build (SHA-256 "
+                                f"{digest[:16]}...) - fine if you put your own copy there"))
     elif d and os.path.isfile(os.path.join(d, "hidapi.dll")):
         checks.append(Check("hidapi.dll", WARN,
                             "using OpenRGB's copy - bundle it so OpenRGB isn't required",
@@ -240,12 +260,38 @@ def run_checks():
         from fifine import hid
         for vid, pid, label in HID_TARGETS:
             cur = hid.hid_enumerate(vid, pid)
+            if cur:
+                hid.hid_free_enumeration(cur)
             checks.append(Check(label, OK if cur else WARN,
                                 f"{vid:04X}:{pid:04X} " + ("detected" if cur else "not connected")))
     except Exception as e:
         checks.append(Check("Direct-HID devices", FAIL, f"hidapi unusable: {e}"))
 
-    # 8. Screen capture
+    # 8. Screen capture - DXGI is what the engine uses; GDI is its fallback
+    try:
+        from dxgi_capture import DXGIGrabber
+        g = DXGIGrabber(8, 8)
+        sw, sh = g.sw, g.sh
+        g.close()
+        checks.append(Check("Screen capture", OK,
+                            f"{sw}x{sh} via DXGI desktop duplication (GPU, fast path)"))
+    except Exception as e:
+        checks.append(Check("Screen capture (DXGI)", WARN,
+                            f"unavailable ({e}) - the slower GDI capture below is used"))
+        checks += _gdi_check()
+    for image, label, why in CONFLICTS:
+        hits = matching(tasks, image)
+        if hits:
+            checks.append(Check(f"Conflict: {label}", WARN,
+                                f"running ({', '.join(hits)}) - {why}",
+                                make_close_fix(image, label), "Close it"))
+        else:
+            checks.append(Check(f"Conflict: {label}", OK, "not running"))
+
+    return checks
+
+
+def _gdi_check():
     try:
         from screen import ScreenGrabber
         g = ScreenGrabber(8, 8)
@@ -253,21 +299,11 @@ def run_checks():
         sw, sh = g.sw, g.sh
         g.close()
         lit = any(raw[i] for i in range(len(raw)))
-        checks.append(Check("Screen capture", OK if lit else WARN,
-                            f"{sw}x{sh}" + ("" if lit else " - frame came back black "
-                                            "(exclusive-fullscreen app in front?)")))
+        return [Check("Screen capture (GDI)", OK if lit else WARN,
+                      f"{sw}x{sh}" + ("" if lit else " - frame came back black "
+                                      "(exclusive-fullscreen app in front?)"))]
     except Exception as e:
-        checks.append(Check("Screen capture", FAIL, f"{type(e).__name__}: {e}"))
-
-    # 9. Conflicting software
-    for image, label, why in CONFLICTS:
-        if image.lower() in tasks.lower():
-            checks.append(Check(f"Conflict: {label}", WARN, f"running - {why}",
-                                make_close_fix(image, label), "Close it"))
-        else:
-            checks.append(Check(f"Conflict: {label}", OK, "not running"))
-
-    return checks
+        return [Check("Screen capture (GDI)", FAIL, f"{type(e).__name__}: {e}")]
 
 
 def summarise(checks):

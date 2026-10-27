@@ -4,7 +4,7 @@ Tkinter (ships with Python, nothing to install). The engine runs on a worker
 thread; this window only reads its stats and mutates the shared CFG dict, which
 the engine re-reads every frame - so every slider takes effect live.
 """
-import threading, traceback, sys, socket
+import threading, traceback, sys, socket, json
 import autostart
 import tkinter as tk
 from tkinter import ttk
@@ -49,20 +49,34 @@ def apply_theme(widget):
     s.configure("Title.TLabel", background=BG, foreground=FG,
                 font=("Segoe UI", 15, "bold"))
     # readable check/radio indicators - the clam defaults render nearly invisible
-    s.configure("TCheckbutton", background=PANEL, foreground=FG,
+    s.configure("TCheckbutton", background=PANEL, foreground=FG, font=("Segoe UI", 9),
                 indicatorcolor=PANEL, focuscolor=PANEL)
-    s.map("TCheckbutton", background=[("active", PANEL)],
-          indicatorcolor=[("selected", ACCENT), ("!selected", "#39404f")])
-    s.configure("TRadiobutton", background=PANEL, foreground=FG,
+    # clam reads indicatorbackground/-foreground; indicatorcolor is what the
+    # other themes use. Set both so the box is blue when on, grey when off.
+    ind = dict(indicatorcolor=[("selected", ACCENT), ("!selected", "#39404f")],
+               indicatorbackground=[("selected", ACCENT), ("!selected", "#39404f")],
+               indicatorforeground=[("selected", "#ffffff"), ("!selected", "#39404f")],
+               upperbordercolor=[("selected", ACCENT), ("!selected", "#4a5263")],
+               lowerbordercolor=[("selected", ACCENT), ("!selected", "#4a5263")])
+    s.map("TCheckbutton", background=[("active", PANEL)], **ind)
+    s.configure("TRadiobutton", background=PANEL, foreground=FG, font=("Segoe UI", 9),
                 indicatorcolor=PANEL, focuscolor=PANEL)
-    s.map("TRadiobutton", background=[("active", PANEL)],
-          indicatorcolor=[("selected", ACCENT), ("!selected", "#39404f")])
+    s.map("TRadiobutton", background=[("active", PANEL)], **ind)
     s.configure("TScale", background=PANEL, troughcolor="#2a2f3a")
     s.configure("Accent.TButton", background=ACCENT, foreground="#0b1020",
                 borderwidth=0, focusthickness=0, font=("Segoe UI", 10, "bold"))
     s.map("Accent.TButton", background=[("active", "#7aa2ff"), ("disabled", "#3a4257")])
     s.configure("Ghost.TButton", background="#2a2f3a", foreground=FG, borderwidth=0)
     s.map("Ghost.TButton", background=[("active", "#39404f"), ("disabled", "#1a1d23")])
+    s.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0),
+                bordercolor=BG, lightcolor=BG, darkcolor=BG)
+    s.configure("TNotebook.Tab", background=BG, foreground=MUTED, padding=(16, 6),
+                borderwidth=0, bordercolor=BG, lightcolor=BG, darkcolor=BG,
+                focuscolor=BG, font=("Segoe UI", 9, "bold"))
+    s.map("TNotebook.Tab",
+          background=[("selected", PANEL), ("active", "#23262e")],
+          foreground=[("selected", FG), ("active", FG)],
+          lightcolor=[("selected", PANEL)], bordercolor=[("selected", PANEL)])
 
 
 class App:
@@ -77,13 +91,63 @@ class App:
 
         root.title("RGB Screen Sync")
         root.configure(bg=BG)
-        root.geometry("580x920")
-        root.minsize(520, 640)
 
         apply_theme(root)
         self._build()
+        self._fit_window()
         self._repair_autostart()
+        self._saved = self._disk_snapshot()
+        self._pending = None
         self._tick()
+        self.root.after(1000, self._autosave)
+
+    def _fit_window(self):
+        """Size the window to its content, capped to the screen."""
+        self.root.update_idletasks()
+        w = max(580, self.root.winfo_reqwidth())
+        h = min(self.root.winfo_reqheight(), self.root.winfo_screenheight() - 80)
+        self.root.geometry(f"{w}x{h}")
+        self.root.minsize(min(w, 560), min(h, 560))
+
+    # ------------------------------------------------------------ autosave --
+    @staticmethod
+    def _snapshot():
+        return json.dumps(CFG, sort_keys=True)
+
+    @staticmethod
+    def _disk_snapshot():
+        try:
+            with open(ambient.CONFIG_PATH, encoding="utf-8") as f:
+                return json.dumps(json.load(f), sort_keys=True)
+        except (OSError, ValueError):
+            return None
+
+    def _autosave(self):
+        """Save once settings have stopped changing for a moment.
+
+        There used to be only a Save button: a slider moved and then Quit,
+        or a shutdown, and the change was gone. Waiting for two equal
+        snapshots a second apart keeps a slider drag from writing the file
+        dozens of times.
+        """
+        self._save_if_changed(settle=True)
+        self.root.after(1000, self._autosave)
+
+    def _save_if_changed(self, settle=False):
+        snap = self._snapshot()
+        if snap == self._saved:
+            self._pending = None
+            return
+        if settle and snap != self._pending:
+            self._pending = snap            # still changing - look again next second
+            return
+        try:
+            save_config()
+            self._saved = snap
+        except OSError as e:
+            if self._pending != "failed":
+                self.write(f"could not save settings: {e}")
+            self._pending = "failed"
 
     def _card(self, parent, title, expand=False):
         ttk.Label(parent, text=title.upper(), style="Head.TLabel").pack(
@@ -92,9 +156,31 @@ class App:
         f.pack(fill="both" if expand else "x", expand=expand)
         return f
 
+    WRAP = 470          # px; hints wrap to the card instead of hard line breaks
+
+    def _hint(self, parent, text, padx=0, pady=(0, 6)):
+        lab = ttk.Label(parent, text=text, style="Card.TLabel", foreground=MUTED,
+                        font=("Segoe UI", 8), justify="left", wraplength=self.WRAP - padx)
+        lab.pack(anchor="w", padx=(padx, 0), pady=pady)
+        return lab
+
+    def _check(self, parent, text, getter, setter, hint=None):
+        v = tk.BooleanVar(value=getter())
+        ttk.Checkbutton(parent, text=text, variable=v,
+                        command=lambda: setter(v.get())).pack(anchor="w")
+        if hint:
+            self._hint(parent, hint, padx=24)
+        return v
+
     # -------------------------------------------------------------- layout --
     def _build(self):
-        outer = ttk.Frame(self.root, padding=16)
+        """Header and controls on top, the rest in three tabs.
+
+        It used to be one long column: about 1350px of content in a 920px
+        window, so on a 1080p screen the Behaviour options and the log were
+        cut off, and the top row was too narrow to show the Rescan button.
+        """
+        outer = ttk.Frame(self.root, padding=(16, 14, 16, 14))
         outer.pack(fill="both", expand=True)
 
         head = ttk.Frame(outer)
@@ -111,16 +197,21 @@ class App:
         self.btn_stop = ttk.Button(btns, text="Stop", style="Ghost.TButton",
                                    command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=8, ipadx=18, ipady=4)
-        ttk.Button(btns, text="Quit", style="Ghost.TButton",
-                   command=self.quit).pack(side="right", padx=(8, 0), ipadx=10, ipady=4)
-        ttk.Button(btns, text="Save settings", style="Ghost.TButton",
-                   command=self.save).pack(side="right", ipadx=10, ipady=4)
         self.btn_rescan = ttk.Button(btns, text="Rescan", style="Ghost.TButton",
                                      command=self.rescan, state="disabled")
-        self.btn_rescan.pack(side="right", padx=8, ipadx=10, ipady=4)
+        self.btn_rescan.pack(side="left", ipadx=10, ipady=4)
+        ttk.Button(btns, text="Quit", style="Ghost.TButton",
+                   command=self.quit).pack(side="right", ipadx=14, ipady=4)
 
-        # devices
-        card = self._card(outer, "Devices")
+        nb = ttk.Notebook(outer)
+        nb.pack(fill="both", expand=True, pady=(14, 0))
+        tab_dev, tab_col, tab_beh = (ttk.Frame(nb) for _ in range(3))
+        nb.add(tab_dev, text="Devices")
+        nb.add(tab_col, text="Colour")
+        nb.add(tab_beh, text="Behaviour")
+
+        # ---- devices + log
+        card = self._card(tab_dev, "Devices")
         self.dev_vars, self.dev_labels, self.swatches = {}, {}, {}
         for key, label, col in DEVICES:
             row = ttk.Frame(card, style="Card.TFrame")
@@ -129,12 +220,8 @@ class App:
                       bd=0).pack(side="left", padx=(0, 7))
             v = tk.BooleanVar(value=CFG["enabled"].get(key, True))
             self.dev_vars[key] = v
-            tk.Checkbutton(row, text=label, variable=v,
-                           command=lambda k=key: self._toggle(k),
-                           bg=PANEL, fg=FG, selectcolor=ACCENT,
-                           activebackground=PANEL, activeforeground=FG,
-                           highlightthickness=0, bd=0,
-                           font=("Segoe UI", 9)).pack(side="left")
+            ttk.Checkbutton(row, text=label, variable=v,
+                            command=lambda k=key: self._toggle(k)).pack(side="left")
             cv = tk.Canvas(row, width=132, height=14, bg=PANEL,
                            highlightthickness=0, bd=0)
             cv.pack(side="right")
@@ -156,106 +243,78 @@ class App:
                    command=self.open_prereqs).pack(side="left", fill="x",
                                                    expand=True, padx=(4, 0), ipady=4)
 
-        # colour quality
-        card = self._card(outer, "Colour quality")
-        row = ttk.Frame(card, style="Card.TFrame")
-        row.pack(fill="x")
-        ttk.Label(row, text="Sampling", style="Card.TLabel", width=11).pack(side="left")
-        self.quality = tk.StringVar(value=CFG.get("quality", "vivid"))
-        for val, txt in (("mean", "Flat"), ("linear", "Accurate"), ("vivid", "Vivid")):
-            tk.Radiobutton(row, text=txt, value=val, variable=self.quality,
-                           command=self._set_quality,
-                           bg=PANEL, fg=FG, selectcolor=ACCENT,
-                           activebackground=PANEL, activeforeground=FG,
-                           highlightthickness=0, bd=0,
-                           font=("Segoe UI", 9)).pack(side="left", padx=(0, 6))
-        self._slider(card, "vividness", "Vividness", 0.0, 10.0, is_int=False)
-        hv = tk.BooleanVar(value=CFG.get("hue_correct", True))
-        tk.Checkbutton(card, text="True-to-screen hues", variable=hv,
-                       command=lambda: CFG.__setitem__("hue_correct", hv.get()),
-                       bg=PANEL, fg=FG, selectcolor=ACCENT,
-                       activebackground=PANEL, activeforeground=FG,
-                       highlightthickness=0, bd=0,
-                       font=("Segoe UI", 9)).pack(anchor="w", pady=(4, 0))
-        ttk.Label(card, style="Card.TLabel", foreground=MUTED, font=("Segoe UI", 8),
-                  justify="left",
-                  text=("LEDs are linear, screens are not: without this, mixed colours\n"
-                        "come out pale and shifted (orange reads yellow). Needs less\n"
-                        "saturation than before - about 1.0-1.3 looks right.")
-                  ).pack(anchor="w", padx=(22, 0))
-        self.q_hint = ttk.Label(card, justify="left", style="Card.TLabel",
-                                foreground=MUTED, font=("Segoe UI", 8), text="")
-        self.q_hint.pack(anchor="w", pady=(6, 0))
-        self._set_quality(log=False)
-
-        # appearance
-        card = self._card(outer, "Master appearance")
-        for key, label, lo, hi in SLIDERS:
-            self._slider(card, key, label, lo, hi, is_int=False)
-        self._slider(card, "fps", "Frame rate", 5, 60, is_int=True)
-        ttk.Label(card, justify="left", style="Card.TLabel", foreground=MUTED,
-                  font=("Segoe UI", 8),
-                  text=("Lower gamma = brighter. Higher smoothing = slower to react.\n"
-                        "Devices given their own values in Device tuning ignore these."
-                        )).pack(anchor="w", pady=(8, 0))
-
-        # behaviour
-        card = self._card(outer, "Behaviour")
-        self.behaviour = {}
-
-        def check(parent, text, getter, setter, hint):
-            v = tk.BooleanVar(value=getter())
-            tk.Checkbutton(parent, text=text, variable=v,
-                           command=lambda: setter(v.get()),
-                           bg=PANEL, fg=FG, selectcolor=ACCENT,
-                           activebackground=PANEL, activeforeground=FG,
-                           highlightthickness=0, bd=0,
-                           font=("Segoe UI", 9)).pack(anchor="w")
-            ttk.Label(parent, text=hint, style="Card.TLabel", foreground=MUTED,
-                      font=("Segoe UI", 8), justify="left").pack(anchor="w",
-                                                                 padx=(22, 0), pady=(0, 6))
-            return v
-
-        self.var_autostart = check(
-            card, "Start with Windows", autostart.is_enabled, self._set_autostart,
-            "Launches this app silently at login and starts syncing.")
-        self.var_lock = check(
-            card, "Pause while locked", lambda: CFG.get("pause_on_lock", True),
-            lambda on: CFG.__setitem__("pause_on_lock", on),
-            "Lights off on the lock screen, back on when you sign in.")
-        check(card, "Pause while the display is off",
-              lambda: CFG.get("pause_on_display_off", True),
-              lambda on: CFG.__setitem__("pause_on_display_off", on),
-              "Lights off when Windows turns the monitor off. Shutdown and sleep\n"
-              "always black everything out first.")
-        check(card, "Keep lights dark when stopped",
-              lambda: CFG.get("dark_when_stopped", True),
-              lambda on: CFG.__setitem__("dark_when_stopped", on),
-              "Stop holds every device black. Off: Stop lets go, and the mic and\n"
-              "arm go back to their own rainbow effect.")
-        check(card, "Closing the window keeps lights dark",
-              lambda: CFG.get("close_to_background", True),
-              lambda on: CFG.__setitem__("close_to_background", on),
-              "Closing hides the window and holds every device dark in the background.\n"
-              "The arm has no off command, so it lights up whenever the app isn't running.\n"
-              "Open RGB Sync again to get the window back; Quit exits for real.")
-        self.var_letterbox = check(
-            card, "Crop black bars in films", lambda: CFG.get("letterbox", False),
-            lambda on: CFG.__setitem__("letterbox", on),
-            "Ignores letterbox bars in films. Best-guess detection - it holds off unless confident.")
-
-        # log
-        card = self._card(outer, "Log", expand=True)
+        card = self._card(tab_dev, "Log", expand=True)
         bar = ttk.Frame(card, style="Card.TFrame")
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="Also saved to logs\\rgbsync.log", style="Card.TLabel",
                   foreground=MUTED, font=("Segoe UI", 8)).pack(side="left")
         ttk.Button(bar, text="Open log folder", style="Ghost.TButton",
                    command=self.open_logs).pack(side="right", ipadx=6)
-        self.log = tk.Text(card, height=6, bg="#12141a", fg=MUTED, bd=0,
+        self.log = tk.Text(card, height=8, bg="#12141a", fg=MUTED, bd=0,
                            insertbackground=FG, font=("Consolas", 8), wrap="word")
         self.log.pack(fill="both", expand=True)
         self.log.configure(state="disabled")
+
+        # ---- colour
+        card = self._card(tab_col, "Colour quality")
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="Sampling", style="Card.TLabel", width=11).pack(side="left")
+        self.quality = tk.StringVar(value=CFG.get("quality", "vivid"))
+        for val, txt in (("mean", "Flat"), ("linear", "Accurate"), ("vivid", "Vivid")):
+            ttk.Radiobutton(row, text=txt, value=val, variable=self.quality,
+                            command=self._set_quality).pack(side="left", padx=(0, 10))
+        self._slider(card, "vividness", "Vividness", 0.0, 10.0, is_int=False)
+        self.q_hint = self._hint(card, "", pady=(2, 8))
+        self._check(card, "True-to-screen hues",
+                    lambda: CFG.get("hue_correct", True),
+                    lambda on: CFG.__setitem__("hue_correct", on),
+                    "LEDs are linear, screens are not: without this, mixed colours come "
+                    "out pale and shifted (orange reads yellow). Needs less saturation "
+                    "than before - about 1.0-1.3 looks right.")
+        self._set_quality(log=False)
+
+        card = self._card(tab_col, "Master appearance")
+        for key, label, lo, hi in SLIDERS:
+            self._slider(card, key, label, lo, hi, is_int=False)
+        self._slider(card, "fps", "Frame rate", 5, 60, is_int=True)
+        self._hint(card, "Lower gamma = brighter. Higher smoothing = slower to react. "
+                         "Devices given their own values in Device tuning ignore these.",
+                   pady=(8, 0))
+
+        # ---- behaviour
+        card = self._card(tab_beh, "Behaviour")
+        self.var_autostart = self._check(
+            card, "Start with Windows", autostart.is_enabled, self._set_autostart,
+            "Launches this app silently at login and starts syncing.")
+        self._check(card, "Pause while locked",
+                    lambda: CFG.get("pause_on_lock", True),
+                    lambda on: CFG.__setitem__("pause_on_lock", on),
+                    "Lights off on the lock screen, back on when you sign in.")
+        self._check(card, "Pause while the display is off",
+                    lambda: CFG.get("pause_on_display_off", True),
+                    lambda on: CFG.__setitem__("pause_on_display_off", on),
+                    "Lights off when Windows turns the monitor off. Shutdown and sleep "
+                    "always black everything out first.")
+        self._check(card, "Keep lights dark when stopped",
+                    lambda: CFG.get("dark_when_stopped", True),
+                    lambda on: CFG.__setitem__("dark_when_stopped", on),
+                    "Stop holds every device black. Off: Stop lets go, and the mic and "
+                    "arm go back to their own rainbow effect.")
+        self._check(card, "Closing the window keeps lights dark",
+                    lambda: CFG.get("close_to_background", True),
+                    lambda on: CFG.__setitem__("close_to_background", on),
+                    "Closing hides the window and holds every device dark in the "
+                    "background - the arm has no off command, so it lights up whenever "
+                    "the app isn't running. Open RGB Sync again to get the window back; "
+                    "Quit exits for real.")
+        self._check(card, "Crop black bars in films",
+                    lambda: CFG.get("letterbox", False),
+                    lambda on: CFG.__setitem__("letterbox", on),
+                    "Ignores letterbox bars in films. Best-guess detection - it holds "
+                    "off unless confident.")
+        ttk.Label(tab_beh, text="Settings are saved automatically.",
+                  style="Muted.TLabel", font=("Segoe UI", 8)).pack(anchor="w", pady=(10, 0))
 
     def _slider(self, parent, key, label, lo, hi, is_int):
         row = ttk.Frame(parent, style="Card.TFrame")
@@ -275,11 +334,11 @@ class App:
                                                 expand=True, padx=8)
 
     HINTS = {
-        "mean":   "Plain average of screen pixels. Mixes colours muddier and\n"
-                  "darker than real light - small bright things wash out.",
-        "linear": "Averages in linear light, the way light physically mixes.\n"
+        "mean":   "Plain average of screen pixels. Mixes colours muddier and darker "
+                  "than real light - small bright things wash out.",
+        "linear": "Averages in linear light, the way light physically mixes. "
                   "A fire or HUD in a dark scene stays visible.",
-        "vivid":  "Linear, but saturated pixels count for more, so a colourful\n"
+        "vivid":  "Linear, but saturated pixels count for more, so a colourful "
                   "object drives the colour instead of averaging into grey.",
     }
 
@@ -327,7 +386,7 @@ class App:
 
         def work():
             try:
-                gained = eng.rescan()
+                gained = eng.call(eng.rescan).result(timeout=60)
                 if not gained:
                     missing = eng.missing()
                     self.write("rescan: nothing new"
@@ -347,10 +406,7 @@ class App:
         CFG["enabled"][key] = self.dev_vars[key].get()
         eng = self.engine
         if eng and not CFG["enabled"][key]:
-            try:
-                eng.blackout_key(key)
-            except Exception:
-                pass
+            eng.call(lambda: eng.blackout_key(key))     # on the engine thread
         elif eng and not eng.found.get(key):
             # disabled devices are never looked for, so look now
             self.rescan()
@@ -428,10 +484,6 @@ class App:
         except Exception as e:
             self.write(f"could not change autostart: {e}")
             self.var_autostart.set(autostart.is_enabled())
-
-    def save(self):
-        save_config()
-        self.write(f"settings saved -> {ambient.CONFIG_PATH}")
 
     # ------------------------------------------------------------- refresh --
     def _tick(self):
@@ -517,6 +569,7 @@ class App:
             pass
 
     def quit(self):
+        self._save_if_changed()
         if self.engine:
             self.engine.stop()
         if self.thread:
