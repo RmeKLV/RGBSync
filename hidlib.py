@@ -147,3 +147,95 @@ class StreamDevice:
         if getattr(self, "dev", None):
             hid.hid_close(self.dev)
             self.dev = None
+
+
+class Streamer:
+    """Feeds one StreamDevice from its own thread, at the device's own rate.
+
+    For devices that go dark - or fall back to their onboard effect - the
+    moment frames stop arriving (the Fifine pair, REFRESH_SEC 0.0). Sending
+    from the engine's frame loop tied their timing to it: with the loop at
+    30 fps a frame landing a fraction early hit the MAX_FPS limit and was
+    dropped, the BM38 (20/s) ended up at 15/s with 66 ms gaps, and a game
+    holding the CPU stretched the gaps further - each one a visible blink.
+
+    Here the engine only hands over the latest colours (set_colors) and this
+    thread sends whatever is current every 1/MAX_FPS on fixed deadlines, the
+    way Genie does. It runs at raised priority inside our below-normal
+    process: a few small USB writes a second, so it can't cost a game anything,
+    but it won't be starved by one either.
+
+    Drop-in for the device: set_colors / fill / close, everything else passes
+    through. A write error is re-raised from the next set_colors call so the
+    engine's fault counting still sees it.
+    """
+
+    THREAD_PRIORITY_HIGHEST = 2
+
+    def __init__(self, dev, name="stream"):
+        import threading
+        self.dev = dev
+        self._lock = threading.Lock()       # one writer on the handle at a time
+        self._colors = None
+        self._error = None
+        self._halt = threading.Event()
+        self.period = 1.0 / max(1, dev.MAX_FPS)
+        self.late = 0                       # sends that missed their deadline by a full period
+        self._thread = threading.Thread(target=self._run, daemon=True, name=name)
+        self._thread.start()
+
+    def __getattr__(self, name):            # LEDS, path, writes, set_light ...
+        return getattr(self.dev, name)
+
+    def set_colors(self, colors, force=False):
+        err, self._error = self._error, None
+        if err is not None:
+            raise err
+        self._colors = list(colors)
+        return 0
+
+    def fill(self, r, g, b):
+        """Write now (blackout must not wait for the next tick), then keep streaming it."""
+        colors = [(r, g, b)] * self.dev.LEDS
+        self._colors = colors
+        with self._lock:
+            if self.dev.dev:
+                return self.dev.set_colors(colors, force=True)
+        return 0
+
+    def set_light(self, on):
+        with self._lock:
+            return self.dev.set_light(on)
+
+    def _run(self):
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.GetCurrentThread.restype = ctypes.c_void_p
+            k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            k32.SetThreadPriority(k32.GetCurrentThread(), self.THREAD_PRIORITY_HIGHEST)
+        except Exception:
+            pass
+        nxt = time.perf_counter()
+        while not self._halt.is_set():
+            colors = self._colors
+            if colors is not None:
+                try:
+                    with self._lock:
+                        if self.dev.dev:
+                            self.dev.set_colors(colors, force=True)
+                except Exception as e:
+                    self._error = e
+            nxt += self.period
+            now = time.perf_counter()
+            if now > nxt + self.period:     # fell behind (suspend, stall): resync
+                self.late += 1
+                nxt = now
+            else:
+                self._halt.wait(max(0.0, nxt - now))
+
+    def close(self):
+        self._halt.set()
+        self._thread.join(timeout=1.0)
+        with self._lock:
+            self.dev.close()

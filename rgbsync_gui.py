@@ -82,6 +82,7 @@ class App:
 
         apply_theme(root)
         self._build()
+        self._repair_autostart()
         self._tick()
 
     def _card(self, parent, title, expand=False):
@@ -403,6 +404,18 @@ class App:
         elif eng:
             eng.stop()
         self.btn_stop.config(state="disabled")
+
+    def _repair_autostart(self):
+        """Folder moved since autostart was switched on? Follow it."""
+        try:
+            old = autostart.repair()
+        except OSError as e:
+            self.write(f"could not check the start-with-Windows entry: {e}")
+            return
+        if old:
+            self.write("start with Windows: pointed at the app's new location")
+            self.write(f"  was: {old}")
+            self.write(f"  now: {autostart.command()}")
 
     def _set_autostart(self, on):
         try:
