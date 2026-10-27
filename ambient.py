@@ -42,6 +42,7 @@ from screen import CaptureThread, Sampler, _srgb_to_linear
 from orgb import OpenRGBClient
 from xg248q import XG248Q
 from fifine import BM38, AM8Pro
+from hidlib import Streamer
 from apex3tkl import Apex3TKL
 from letterbox import Letterbox
 import logbook
@@ -407,8 +408,10 @@ class Engine:
         # usage_page 0x000C reporting product 'IAP' and iface 0 on 0x00FF
         # reporting 'LED'. The LEDs answer on the 'IAP' one - verified on
         # hardware. Do not "fix" this to 0x00FF.
-        self.bm38 = self._try("bm38", "Fifine BM38 arm (48)", lambda: BM38(0x000C))
-        self.am8 = self._try("am8", "Fifine AM8 Pro (12)", AM8Pro)
+        self.bm38 = self._try("bm38", "Fifine BM38 arm (48)",
+                              lambda: Streamer(BM38(0x000C), "bm38"))
+        self.am8 = self._try("am8", "Fifine AM8 Pro (12)",
+                             lambda: Streamer(AM8Pro(), "am8"))
         self._am8_light(True)
         self._discover_kbd_hid()
 
@@ -630,9 +633,11 @@ class Engine:
         if self.monitor is None:
             self.monitor = self._try("monitor", "XG248Q backlight (3)", XG248Q)
         if self.bm38 is None:
-            self.bm38 = self._try("bm38", "Fifine BM38 arm (48)", lambda: BM38(0x000C))
+            self.bm38 = self._try("bm38", "Fifine BM38 arm (48)",
+                              lambda: Streamer(BM38(0x000C), "bm38"))
         if self.am8 is None:
-            self.am8 = self._try("am8", "Fifine AM8 Pro (12)", AM8Pro)
+            self.am8 = self._try("am8", "Fifine AM8 Pro (12)",
+                             lambda: Streamer(AM8Pro(), "am8"))
             self._am8_light(True)
         self._discover_kbd_hid()
         gained = [k for k in DEVICE_KEYS if self.found.get(k) and not before[k]]
