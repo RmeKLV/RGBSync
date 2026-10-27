@@ -4,6 +4,10 @@
     python bench.py --engine        ... and the full engine driving your devices
     python bench.py --seconds 20    longer phases, steadier numbers
 
+The DXGI phases show the new capture path; on a static desktop it reuses the
+last frame for free, so move a window around or play a video during them to
+see its cost under load.
+
 Close the GUI first (two copies would fight over the devices) and leave the
 desktop alone while it runs. Every phase reports:
 
@@ -69,9 +73,13 @@ def phase_idle(seconds):
 def phase_capture(seconds, fps, stretch_name="halftone"):
     """The capture loop alone, as CaptureThread runs it, plus sampling."""
     import screen
-    stretch = screen.HALFTONE if stretch_name == "halftone" else screen.COLORONCOLOR
     cols, rows = 48, 27
-    g = screen.ScreenGrabber(cols, rows, stretch=stretch)
+    if stretch_name == "dxgi":
+        from dxgi_capture import DXGIGrabber
+        g = DXGIGrabber(cols, rows)
+    else:
+        stretch = screen.HALFTONE if stretch_name == "halftone" else screen.COLORONCOLOR
+        g = screen.ScreenGrabber(cols, rows, stretch=stretch)
     sampler = screen.Sampler(cols, rows, "vivid", 4.0)
     grabs = []
     collect = probe(seconds)
@@ -114,7 +122,8 @@ def phase_engine(seconds):
     th.join(3)
     eng.close()
     return {"cpu": cpu, "grab": (statistics.mean(grabs), pct(grabs, 0.95)) if grabs else None,
-            "lat": collect(), "rate": fps, "devices": [k for k, v in eng.found.items() if v]}
+            "lat": collect(), "rate": fps, "backend": eng.cap.backend,
+            "devices": [k for k, v in eng.found.items() if v]}
 
 
 def main():
@@ -129,7 +138,9 @@ def main():
             ("capture 30/s  (new default)", lambda: phase_capture(s, 30)),
             ("capture 60/s", lambda: phase_capture(s, 60)),
             ("capture 120/s (old, always on)", lambda: phase_capture(s, 120)),
-            ("capture 30/s  fast filter", lambda: phase_capture(s, 30, "fast"))]
+            ("capture 30/s  fast filter", lambda: phase_capture(s, 30, "fast")),
+            ("capture 30/s  DXGI (new)", lambda: phase_capture(s, 30, "dxgi")),
+            ("capture 60/s  DXGI (new)", lambda: phase_capture(s, 60, "dxgi"))]
     if a.engine:
         plan.append(("full engine, your config", lambda: phase_engine(s)))
 
@@ -149,7 +160,8 @@ def main():
             lat = "{:.2f}/{:.2f}/{:.1f}".format(*r["lat"])
             line = f"{name:32} {rate:>6} {r['cpu']:7.1f}% {grab:>13} {lat:>22}"
             if r.get("devices") is not None:
-                line += "   devices: " + (", ".join(r["devices"]) or "none")
+                line += (f"   capture: {r['backend']}   devices: "
+                         + (", ".join(r["devices"]) or "none"))
         print(line, flush=True)
         out.append(line)
 

@@ -58,19 +58,27 @@ while a stream of frames keeps arriving; once it stops they go back to their onb
 
 | Device | Setting |
 |---|---|
-| Fifine mic + arm | **BIOS → Advanced → APM Configuration → ErP Ready → Enabled (S4+S5)**. This cuts USB standby power when the PC is off, so they have nothing to light up with. Keyboard lights go dark too, and USB charging stops while the PC is off. Alternatively, switch their own lighting off with the RGB touch button or Fifine Genie. The device remembers that setting, and the app overrides it while it runs. |
+| Fifine mic | Handled by the app: it switches the AM8 Pro's own lighting off whenever it lets go (exit, shutdown, sleep) and back on when it takes over (`am8_light_off`). The command comes from Fifine Genie's plugin. |
+| Fifine arm (and mic, as a fallback) | The BM38 has no lighting-off command; Genie's own plugin doesn't have one either. **BIOS → Advanced → APM Configuration → ErP Ready → Enabled (S4+S5)**. This cuts USB standby power when the PC is off, so they have nothing to light up with. Keyboard lights go dark too, and USB charging stops while the PC is off. Alternatively, switch their own lighting off with the RGB touch button or Fifine Genie. The device remembers that setting, and the app overrides it while it runs. |
 | Monitor backlight | Monitor OSD → **Light / Aura RGB → Off**. The monitor powers its own backlight, so it uses its OSD effect whenever the PC isn't driving it. If the app can't control the backlight with that set, leave *Aura Sync* on in the OSD. |
 | Motherboard | BIOS → Advanced → Onboard Devices Configuration → **LED lighting → Stealth mode** for the sleep/off states. |
 
-Sleep (S3) keeps USB powered and ErP does not apply, so the mic and arm show their onboard effect
-while the PC sleeps unless their own lighting is set to off.
+Sleep (S3) keeps USB powered and ErP does not apply, so the arm shows its onboard effect
+while the PC sleeps unless its own lighting is switched off on the arm.
 
 ## Performance
 
-Screen capture is the only part a game can feel. Each grab makes Windows copy the composited desktop
-back from the GPU and scale it down on the CPU. Older versions grabbed **120 times a second, always**,
+Screen capture is the only part a game can feel. The old GDI capture made Windows copy the whole
+composited desktop back from the GPU and scale it down on the CPU: about 12-14 ms and 20% of a core
+at 30 grabs a second on a 1440p screen. Older versions also grabbed **120 times a second, always**,
 even when the engine ran at 30-60 fps and even while paused. Now:
 
+- capture uses **DXGI Desktop Duplication** (`dxgi_capture.py`): the GPU shrinks the desktop with
+  its own mipmaps, and only a ~80x45 image (a few KB) is read back. When nothing on screen has
+  changed, the last frame is reused at no cost. Frames that arrive in 16-bit colour (Windows 11
+  Auto Color Management or HDR) are handled too, and converted after the GPU shrinks them. If it
+  can't start (rotated display, remote session) or keeps failing, it falls back to GDI on its own. The status line shows which
+  one is running (`dxgi` or `gdi`), and `capture` in the config can force either;
 - capture runs at the engine's frame rate (default **30**; no device accepts colour faster), and
   stops entirely while paused or held dark;
 - the process runs at **below-normal priority** (`low_priority`), so a game's threads always go first;
@@ -82,7 +90,9 @@ To measure it on your machine, close the GUI and run:
 python bench.py --engine
 ```
 
-That compares a baseline with capture at 30/60/120 per second and the full engine. For each one it
+That compares a baseline with GDI capture at 30/60/120 per second, DXGI capture, and the full
+engine. Keep something moving on screen during the DXGI phases (a video, or drag a window), because
+on a still desktop it costs almost nothing and the numbers would flatter it. For each one it
 reports CPU use, grab time, and how late an unrelated normal-priority thread wakes up (a stand-in for
 a game). For the in-game number, run the same scene with an FPS/frametime overlay (Steam, NVIDIA,
 AMD, or CapFrameX/PresentMon for 1% lows), once with the app syncing and once after pressing Stop.
@@ -177,6 +187,8 @@ The interesting keys:
 | `hue_correct` | mix LED colours in linear light (see Colour accuracy) |
 | `pause_on_display_off` | black out while Windows has the monitor off |
 | `dark_when_stopped` | Stop keeps the devices black instead of letting go |
+| `capture` | `auto` (DXGI, falling back to GDI), `dxgi`, or `gdi` |
+| `am8_light_off` | switch the mic's own lighting off when the app lets go |
 | `low_priority` | run below normal priority so games always win the CPU |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.
