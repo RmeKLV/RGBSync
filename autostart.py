@@ -62,5 +62,21 @@ def disable():
         pass
 
 
+def repair():
+    """Point an existing Run entry at this copy of the app. -> old command if
+    it was changed, else None.
+
+    The entry stores an absolute path. Move the folder and it keeps naming
+    the old one, so Windows silently starts nothing at login - while
+    is_enabled() still says yes, because the value exists. Only ever
+    rewrites an entry that is already there; never turns autostart on.
+    """
+    old = current_command()
+    if not old or old == command():
+        return None
+    enable()
+    return old
+
+
 def set_enabled(on):
     return enable() if on else (disable() or None)
