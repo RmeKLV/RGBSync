@@ -114,6 +114,9 @@ DEFAULTS = {
                                # we let go (exit, shutdown, sleep), so it stays
                                # dark; back on when we take over. The BM38 has
                                # no such command.
+    "close_to_background": True,  # GUI: closing the window hides it and holds
+                               # the lights dark instead of exiting (the BM38
+                               # arm can only be kept dark by a running app)
     "low_priority": True,      # run below normal priority so a game always wins
     "config_version": 3,
     "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},

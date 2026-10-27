@@ -4,7 +4,7 @@ Tkinter (ships with Python, nothing to install). The engine runs on a worker
 thread; this window only reads its stats and mutates the shared CFG dict, which
 the engine re-reads every frame - so every slider takes effect live.
 """
-import threading, traceback, sys
+import threading, traceback, sys, socket
 import autostart
 import tkinter as tk
 from tkinter import ttk
@@ -110,6 +110,8 @@ class App:
         self.btn_stop = ttk.Button(btns, text="Stop", style="Ghost.TButton",
                                    command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=8, ipadx=18, ipady=4)
+        ttk.Button(btns, text="Quit", style="Ghost.TButton",
+                   command=self.quit).pack(side="right", padx=(8, 0), ipadx=10, ipady=4)
         ttk.Button(btns, text="Save settings", style="Ghost.TButton",
                    command=self.save).pack(side="right", ipadx=10, ipady=4)
         self.btn_rescan = ttk.Button(btns, text="Rescan", style="Ghost.TButton",
@@ -230,6 +232,12 @@ class App:
               lambda on: CFG.__setitem__("dark_when_stopped", on),
               "Stop holds every device black. Off: Stop lets go, and the mic and\n"
               "arm go back to their own rainbow effect.")
+        check(card, "Closing the window keeps lights dark",
+              lambda: CFG.get("close_to_background", True),
+              lambda on: CFG.__setitem__("close_to_background", on),
+              "Closing hides the window and holds every device dark in the background.\n"
+              "The arm has no off command, so it lights up whenever the app isn't running.\n"
+              "Open RGB Sync again to get the window back; Quit exits for real.")
         self.var_letterbox = check(
             card, "Crop black bars in films", lambda: CFG.get("letterbox", False),
             lambda on: CFG.__setitem__("letterbox", on),
@@ -471,6 +479,31 @@ class App:
         self.root.after(120, self._tick)
 
     def on_close(self):
+        """Window X. Hide and hold dark rather than exit, when that is on.
+
+        Exiting is the one state nothing can keep the BM38 arm dark in: it has
+        no lighting-off command, so its onboard effect runs the moment our
+        stream stops. A running app can hold it black indefinitely.
+        """
+        eng = self.engine
+        if CFG.get("close_to_background", True) and eng and eng.running:
+            if not eng.held:
+                eng.hold(True)
+                self.write("--- window closed: running in background, lights dark ---")
+            self.root.withdraw()
+            return
+        self.quit()
+
+    def show(self):
+        """Bring the window back - another launch of the app asked for it."""
+        self.root.deiconify()
+        self.root.lift()
+        try:
+            self.root.focus_force()
+        except tk.TclError:
+            pass
+
+    def quit(self):
         if self.engine:
             self.engine.stop()
         if self.thread:
@@ -478,11 +511,71 @@ class App:
         self.root.destroy()
 
 
+# One copy at a time: a second one would fight the first over every device.
+# The first copy listens on a loopback port; a later launch finds it taken,
+# asks the first to show its window, and exits. Loopback-only, so no firewall
+# prompt and nothing reachable from outside the PC.
+INSTANCE_PORT = 47391
+
+
+def claim_instance():
+    """-> (listening socket or None, already_running).
+
+    already_running is True only when another copy actually answered. If the
+    port is held by something else entirely, we run anyway, just without the
+    hand-off - refusing to start over a port clash would be worse.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        srv.bind(("127.0.0.1", INSTANCE_PORT))
+        srv.listen(2)
+        return srv, False
+    except OSError:
+        srv.close()
+    try:
+        with socket.create_connection(("127.0.0.1", INSTANCE_PORT), timeout=1.0) as c:
+            c.sendall(b"show")
+            c.shutdown(socket.SHUT_WR)
+            c.settimeout(1.0)
+            ok = c.recv(16).startswith(b"ok")
+    except OSError:
+        ok = False
+    return None, ok
+
+
+def serve_instance(srv, on_show):
+    def loop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(2.0)
+                    if conn.recv(16).startswith(b"show"):
+                        conn.sendall(b"ok")
+                        on_show()
+                    # Let the caller hang up first: whichever side closes
+                    # first holds the port in TIME_WAIT, and that must not be
+                    # the listening port, or a quick relaunch can't bind it.
+                    while conn.recv(16):
+                        pass
+                except OSError:
+                    pass
+    threading.Thread(target=loop, daemon=True).start()
+
+
 if __name__ == "__main__":
+    srv, running = claim_instance()
+    if running:
+        sys.exit(0)             # already running - it has been asked to show itself
     load_config()
     logbook.session_header("gui")
     root = tk.Tk()
     app = App(root)
+    if srv is not None:
+        serve_instance(srv, lambda: root.after(0, app.show))
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     if "--autostart" in sys.argv:
         # launched at login: start syncing straight away, out of the way
