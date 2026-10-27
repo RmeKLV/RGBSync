@@ -1,5 +1,6 @@
 # local user settings (ship config.example.json instead)
 config.json
+config.v*.json
 
 # runtime output
 logs/
