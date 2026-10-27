@@ -23,6 +23,7 @@
   "hue_correct": true,
   "pause_on_display_off": true,
   "dark_when_stopped": true,
+  "capture": "auto",
   "low_priority": true,
   "config_version": 3,
   "enabled": {

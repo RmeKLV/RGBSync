@@ -131,7 +131,10 @@ class Sampler:
 
 
 class ScreenGrabber:
-    """Downsamples the primary monitor to a cols x rows BGRA grid."""
+    """Downsamples the primary monitor to a cols x rows BGRA grid. GDI path:
+    the fallback when DXGI Desktop Duplication (dxgi_capture.py) can't run."""
+
+    backend = "gdi"
 
     def __init__(self, cols=48, rows=27, stretch=HALFTONE):
         self.cols, self.rows = cols, rows
@@ -166,10 +169,27 @@ class ScreenGrabber:
             pass
 
 
+def make_grabber(cols, rows, backend="auto"):
+    """-> (grabber, note). DXGI when it works, GDI otherwise.
+
+    note says why DXGI was not used, for the log; empty when it was.
+    """
+    if backend in ("auto", "dxgi"):
+        try:
+            from dxgi_capture import DXGIGrabber
+            return DXGIGrabber(cols, rows), ""
+        except Exception as e:
+            note = f"DXGI unavailable ({e}) - using GDI"
+    else:
+        note = "GDI (set in config)"
+    return ScreenGrabber(cols, rows), note
+
+
 class CaptureThread(threading.Thread):
     """Grabs continuously; `latest()` returns the most recent frame.
 
-    The grabber is created inside run() so its GDI objects belong to this thread.
+    The grabber is created inside run() so its GDI objects / D3D11 context
+    belong to this thread - neither may be used from any other.
 
     Every grab makes DWM hand the composited desktop back from the GPU and
     scales it on the CPU, so this is the one part of the app a game can feel.
@@ -178,13 +198,18 @@ class CaptureThread(threading.Thread):
     while the lights are held dark.
     """
 
-    def __init__(self, cols=48, rows=27, max_fps=30):
+    REBUILD_AFTER = 10      # consecutive failed grabs before recreating the grabber
+
+    def __init__(self, cols=48, rows=27, max_fps=30, backend="auto", log=None):
         super().__init__(daemon=True)
         self.cols, self.rows = cols, rows
         self.max_fps = max_fps
+        self.want_backend = backend
+        self.backend = ""
+        self.log = log or (lambda m: None)
         self._raw = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
+        self._halt = threading.Event()     # not _stop: Thread uses that name
         self._ready = threading.Event()
         self._paused = threading.Event()
         self.fps = 0.0
@@ -192,11 +217,10 @@ class CaptureThread(threading.Thread):
         self.screen_size = (0, 0)
 
     def run(self):
-        g = ScreenGrabber(self.cols, self.rows)
-        self.screen_size = (g.sw, g.sh)
-        n, t0, spent = 0, time.perf_counter(), 0.0
+        g = self._open(self.want_backend)
+        n, t0, spent, fails, rebuilt = 0, time.perf_counter(), 0.0, 0, False
         try:
-            while not self._stop.is_set():
+            while not self._halt.is_set():
                 if self._paused.is_set():
                     self.fps = 0.0
                     time.sleep(0.1)
@@ -205,7 +229,18 @@ class CaptureThread(threading.Thread):
                 t = time.perf_counter()
                 try:
                     raw = g.grab()
-                except Exception:
+                    fails = 0
+                except Exception as e:
+                    fails += 1
+                    if fails == 1:
+                        self.log(f"capture : {g.backend} grab failed: {e}")
+                    if fails >= self.REBUILD_AFTER:
+                        # resolution/HDR change, driver reset... start over;
+                        # if DXGI already got one rebuild, stay on GDI
+                        g.close()
+                        want = "gdi" if (rebuilt and g.backend == "dxgi") else self.want_backend
+                        g = self._open(want)
+                        rebuilt, fails = True, 0
                     time.sleep(0.2)
                     continue
                 spent += time.perf_counter() - t
@@ -223,6 +258,13 @@ class CaptureThread(threading.Thread):
         finally:
             g.close()
 
+    def _open(self, backend):
+        g, note = make_grabber(self.cols, self.rows, backend)
+        self.backend = g.backend
+        self.screen_size = (g.sw, g.sh)
+        self.log(f"capture : {g.backend}" + (f" - {note}" if note else ""))
+        return g
+
     def latest(self):
         with self._lock:
             return self._raw
@@ -234,4 +276,4 @@ class CaptureThread(threading.Thread):
         (self._paused.set if on else self._paused.clear)()
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()

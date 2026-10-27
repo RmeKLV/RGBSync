@@ -109,6 +109,7 @@ DEFAULTS = {
     "dark_when_stopped": True, # Stop keeps streaming black instead of letting go;
                                # otherwise the mic and arm fall back to their own
                                # rainbow the moment the stream ends
+    "capture":    "auto",      # "auto" (DXGI, falling back to GDI) | "dxgi" | "gdi"
     "low_priority": True,      # run below normal priority so a game always wins
     "config_version": 3,
     "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},
@@ -376,7 +377,8 @@ class Engine:
         if CFG.get("low_priority", True):
             set_low_priority(self.log)
         self.cpu_pct = 0.0
-        self.cap = CaptureThread(self.C, self.R, max_fps=CFG["fps"])
+        self.cap = CaptureThread(self.C, self.R, max_fps=CFG["fps"],
+                                 backend=CFG.get("capture", "auto"), log=self.log)
         self.cap.start()
         if not self.cap.wait_ready(3.0):
             self.log("WARNING: no screen frame yet")
