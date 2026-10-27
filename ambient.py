@@ -110,6 +110,10 @@ DEFAULTS = {
                                # otherwise the mic and arm fall back to their own
                                # rainbow the moment the stream ends
     "capture":    "auto",      # "auto" (DXGI, falling back to GDI) | "dxgi" | "gdi"
+    "am8_light_off": True,     # switch the AM8 Pro's own lighting off whenever
+                               # we let go (exit, shutdown, sleep), so it stays
+                               # dark; back on when we take over. The BM38 has
+                               # no such command.
     "low_priority": True,      # run below normal priority so a game always wins
     "config_version": 3,
     "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},
@@ -402,6 +406,7 @@ class Engine:
         # hardware. Do not "fix" this to 0x00FF.
         self.bm38 = self._try("bm38", "Fifine BM38 arm (48)", lambda: BM38(0x000C))
         self.am8 = self._try("am8", "Fifine AM8 Pro (12)", AM8Pro)
+        self._am8_light(True)
         self._discover_kbd_hid()
 
         self.counts = {
@@ -430,6 +435,15 @@ class Engine:
             self.power.wait_ready()
         except Exception as e:
             self.log(f"power   : no shutdown/sleep notifications ({e})")
+
+    def _am8_light(self, on):
+        """The mic's own lighting switch (see AM8Pro.set_light). Engine thread only."""
+        if not (self.am8 and CFG.get("am8_light_off", True) and self.on("am8")):
+            return
+        try:
+            self.am8.set_light(on)
+        except Exception as e:
+            self.log(f"am8: lighting switch failed: {type(e).__name__}: {e}")
 
     def missing(self):
         """Enabled devices we have not found. A disabled one is not 'missing'."""
@@ -616,6 +630,7 @@ class Engine:
             self.bm38 = self._try("bm38", "Fifine BM38 arm (48)", lambda: BM38(0x000C))
         if self.am8 is None:
             self.am8 = self._try("am8", "Fifine AM8 Pro (12)", AM8Pro)
+            self._am8_light(True)
         self._discover_kbd_hid()
         gained = [k for k in DEVICE_KEYS if self.found.get(k) and not before[k]]
         for k in gained:
@@ -978,11 +993,14 @@ class Engine:
             self.cap.pause(True)            # nothing to sample; stop grabbing
             try: self.blackout()
             except Exception: pass
+            if reason in ("shutdown", "suspend"):
+                self._am8_light(False)      # we're about to stop streaming
         elif pause and reason != self.pause_reason:
             self.pause_reason = reason
         elif not pause and self.paused:
             self.paused, self.pause_reason = False, ""
             self.cap.pause(False)
+            self._am8_light(True)
             self.log("resumed")
             self._last_mode_refresh = 0.0
             self._refresh_modes()
@@ -1023,6 +1041,7 @@ class Engine:
         if self.power:
             self.power.stop()
         self.blackout()
+        self._am8_light(False)
         self.cap.stop()
         if self.kbd_hid:
             try:

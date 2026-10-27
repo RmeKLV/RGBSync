@@ -58,11 +58,12 @@ while a stream of frames keeps arriving; once it stops they go back to their onb
 
 | Device | Setting |
 |---|---|
-| Fifine mic + arm | **BIOS → Advanced → APM Configuration → ErP Ready → Enabled (S4+S5)**. This cuts USB standby power when the PC is off, so they have nothing to light up with. Keyboard lights go dark too, and USB charging stops while the PC is off. Alternatively, switch their own lighting off with the RGB touch button or Fifine Genie. The device remembers that setting, and the app overrides it while it runs. |
+| Fifine mic | Handled by the app: it switches the AM8 Pro's own lighting off whenever it lets go (exit, shutdown, sleep) and back on when it takes over (`am8_light_off`). The command comes from Fifine Genie's plugin. |
+| Fifine arm (and mic, as a fallback) | The BM38 has no lighting-off command; Genie's own plugin doesn't have one either. **BIOS → Advanced → APM Configuration → ErP Ready → Enabled (S4+S5)**. This cuts USB standby power when the PC is off, so they have nothing to light up with. Keyboard lights go dark too, and USB charging stops while the PC is off. Alternatively, switch their own lighting off with the RGB touch button or Fifine Genie. The device remembers that setting, and the app overrides it while it runs. |
 | Monitor backlight | Monitor OSD → **Light / Aura RGB → Off**. The monitor powers its own backlight, so it uses its OSD effect whenever the PC isn't driving it. If the app can't control the backlight with that set, leave *Aura Sync* on in the OSD. |
 | Motherboard | BIOS → Advanced → Onboard Devices Configuration → **LED lighting → Stealth mode** for the sleep/off states. |
 
-Sleep (S3) keeps USB powered and ErP does not apply, so the mic and arm show their onboard effect
+Sleep (S3) keeps USB powered and ErP does not apply, so the arm shows its onboard effect
 while the PC sleeps unless their own lighting is set to off.
 
 ## Performance
@@ -187,6 +188,7 @@ The interesting keys:
 | `pause_on_display_off` | black out while Windows has the monitor off |
 | `dark_when_stopped` | Stop keeps the devices black instead of letting go |
 | `capture` | `auto` (DXGI, falling back to GDI), `dxgi`, or `gdi` |
+| `am8_light_off` | switch the mic's own lighting off when the app lets go |
 | `low_priority` | run below normal priority so games always win the CPU |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.

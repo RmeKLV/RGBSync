@@ -60,6 +60,10 @@ class BM38(FifineDevice):
     def fill(self, r, g, b):
         return self.set_colors([(r, g, b)] * self.LEDS, force=True)
 
+    # No set_light(): BM38.js has no command for the arm's onboard lighting.
+    # Its Shutdown() builds a packet and never sends it, so once our stream
+    # stops the arm runs its own effect and nothing on USB can switch it off.
+
 
 class AM8Pro(FifineDevice):
     """Microphone. 12 LEDs. Packet: [A5 5A FE 26 0B 0C] + 12*RGB + [0x16], padded to 256.
@@ -91,3 +95,29 @@ class AM8Pro(FifineDevice):
 
     def fill(self, r, g, b):
         return self.set_colors([(r, g, b)] * self.LEDS, force=True)
+
+    def set_light(self, on):
+        """The mic's own lighting switch - what it shows when nobody streams.
+
+        From Genie's AM8Pro.js configData('lightSwitch', byte):
+        [A5 5A FE 02 11 byte 16], same 256-byte report as a colour frame.
+        Switched off when we let go (exit, shutdown, sleep) so the mic stays
+        dark instead of falling back to its rainbow; back on when we start.
+        """
+        self._write([0xA5, 0x5A, 0xFE, 0x02, 0x11, 0x01 if on else 0x00, 0x16], 256)
+
+
+if __name__ == "__main__":
+    # Hardware check for set_light, which is read from Genie's plugin but not
+    # yet confirmed on a device:  python fifine.py am8-off | am8-on
+    import sys
+    m = AM8Pro()
+    if "am8-off" in sys.argv:
+        m.set_light(False)
+        print("AM8 Pro lighting switched OFF - it should go dark and stay dark")
+    elif "am8-on" in sys.argv:
+        m.set_light(True)
+        print("AM8 Pro lighting switched ON - its own effect should come back")
+    else:
+        print("usage: python fifine.py am8-off | am8-on   (close RGB Sync first)")
+    m.close()
