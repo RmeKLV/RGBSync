@@ -15,7 +15,7 @@ MIN_FRAC = 0.04      # smallest allowed region, as a fraction of the screen
 DEVICES = [
     ("mobo",    "Motherboard",      "#ff7a45"),
     ("kbd",     "Keyboard",         "#5b8cff"),
-    ("mouse",   "Mouse",            "#3ddc84"),
+    ("mouse",   "Mouse (RGB only)", "#3ddc84"),
     ("monitor", "Monitor backlight", "#ffd93d"),
     ("bm38",    "BM38 boom arm",    "#ff6bd6"),
     ("am8",     "AM8 Pro mic",      "#4ee0e0"),

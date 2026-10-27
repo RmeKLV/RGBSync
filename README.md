@@ -2,8 +2,8 @@
 
 Real-time ambient lighting for Windows. Samples what's on your screen and pushes the colour to every
 RGB device you own — each one reading its **own** region of the display, so the keyboard follows the
-bottom of the screen, the mouse follows the corner next to it, and the mic lights up with whatever is
-happening on that side of the monitor.
+bottom of the screen, the boom arm follows the side of the monitor it sits on, and the mic lights up
+with whatever is happening there.
 
 No pip install. No runtime. **Zero third-party Python packages** — the whole thing is the standard
 library, `ctypes`, and one bundled `hidapi.dll`.
@@ -15,7 +15,7 @@ library, `ctypes`, and one bundled `hidapi.dll`.
 | Device | Path |
 |---|---|
 | Motherboard / RAM / anything OpenRGB sees | OpenRGB SDK |
-| Razer DeathAdder V2 | OpenRGB SDK |
+| An RGB mouse (off by default — the Razer Viper here has no LEDs, only a battery light) | OpenRGB SDK |
 | SteelSeries Apex 3 TKL (8-zone) | direct USB HID |
 | ASUS XG248Q monitor backlight | direct USB HID |
 | Fifine BM38 boom arm | direct USB HID |
@@ -44,6 +44,62 @@ Both of these look identical from software — the device reports success and si
 - **A device disappears or shows up late.** Missing devices are retried on a background timer, so
   plugging something in — or starting OpenRGB after the app — no longer means restarting anything.
 
+## Dark when the PC is off
+
+Off has to be an active state for some of this hardware. The Fifine mic and arm show our colours only
+while a stream of frames keeps arriving; once it stops they go back to their onboard rainbow. So:
+
+- **Locked, display asleep, or Stop pressed:** the engine keeps streaming black. They stay dark.
+  (Stop holds the lights dark by default; untick *Keep lights dark when stopped* to let go instead.)
+- **Shutdown, restart, sign-out and sleep:** `power.py` catches them before Windows goes ahead,
+  and everything is blacked out first.
+- **After the PC is off:** no software is running to hold anything, so what you see is whatever each
+  device does on its own with standby power. Change these once:
+
+| Device | Setting |
+|---|---|
+| Fifine mic + arm | **BIOS → Advanced → APM Configuration → ErP Ready → Enabled (S4+S5)**. This cuts USB standby power when the PC is off, so they have nothing to light up with. Keyboard lights go dark too, and USB charging stops while the PC is off. Alternatively, switch their own lighting off with the RGB touch button or Fifine Genie. The device remembers that setting, and the app overrides it while it runs. |
+| Monitor backlight | Monitor OSD → **Light / Aura RGB → Off**. The monitor powers its own backlight, so it uses its OSD effect whenever the PC isn't driving it. If the app can't control the backlight with that set, leave *Aura Sync* on in the OSD. |
+| Motherboard | BIOS → Advanced → Onboard Devices Configuration → **LED lighting → Stealth mode** for the sleep/off states. |
+
+Sleep (S3) keeps USB powered and ErP does not apply, so the mic and arm show their onboard effect
+while the PC sleeps unless their own lighting is set to off.
+
+## Performance
+
+Screen capture is the only part a game can feel. Each grab makes Windows copy the composited desktop
+back from the GPU and scale it down on the CPU. Older versions grabbed **120 times a second, always**,
+even when the engine ran at 30-60 fps and even while paused. Now:
+
+- capture runs at the engine's frame rate (default **30**; no device accepts colour faster), and
+  stops entirely while paused or held dark;
+- the process runs at **below-normal priority** (`low_priority`), so a game's threads always go first;
+- the status line shows the live cost: capture rate, ms per grab, and the app's CPU use.
+
+To measure it on your machine, close the GUI and run:
+
+```
+python bench.py --engine
+```
+
+That compares a baseline with capture at 30/60/120 per second and the full engine. For each one it
+reports CPU use, grab time, and how late an unrelated normal-priority thread wakes up (a stand-in for
+a game). For the in-game number, run the same scene with an FPS/frametime overlay (Steam, NVIDIA,
+AMD, or CapFrameX/PresentMon for 1% lows), once with the app syncing and once after pressing Stop.
+Stop now halts capture too, so the difference between the two runs is the app's cost.
+
+## Colour accuracy
+
+- **Linear-light sampling**: screen colours are averaged as light, not as sRGB bytes.
+- **True-to-screen hues** (`hue_correct`): LEDs are linear and screens are not, so sending the
+  screen's bytes straight through makes every mixed colour pale and shifted (orange reads yellow,
+  teal reads cyan). Channel ratios now come from linear light, and the brightest channel keeps its
+  level, so brightness is unchanged. This needs much less saturation than before. Configs from older
+  versions are reduced automatically, and the original is kept as `config.v1.json`.
+- **Vivid** mode no longer lets near-black capture noise count as "saturated" colour in dark scenes.
+- Per-device gain (Device tuning) is white balance: put the screen on white and trim each device
+  until it matches.
+
 ## Architecture
 
 ```
@@ -68,6 +124,7 @@ rgbsync_gui.py   Tkinter control panel. The engine runs on a worker thread; the
 ```
 
 Supporting modules: `letterbox.py` (black-bar detection), `session.py` (lock/idle handling),
+`power.py` (shutdown / sleep / display-off notifications), `bench.py` (performance measurement),
 `autostart.py` (registry run-key), `logbook.py` (diagnostic logging), `prereqs.py` (environment
 checks and the safe subset of fixes).
 
@@ -117,6 +174,10 @@ The interesting keys:
 | `rescan_sec` | how often to retry missing devices |
 | `mode_refresh_sec` | how often to check that devices are still in direct mode |
 | `mode_verify` | read the current mode before re-asserting it; `false` re-asserts blind |
+| `hue_correct` | mix LED colours in linear light (see Colour accuracy) |
+| `pause_on_display_off` | black out while Windows has the monitor off |
+| `dark_when_stopped` | Stop keeps the devices black instead of letting go |
+| `low_priority` | run below normal priority so games always win the CPU |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.
 
