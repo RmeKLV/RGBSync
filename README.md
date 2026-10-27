@@ -166,7 +166,8 @@ python -u ambient.py
 
 ## Configuration
 
-Settings live in `config.json`, written next to the scripts. Copy `config.example.json` to
+Settings live in `config.json`, written next to the scripts. The GUI saves changes on its own a second or two after you stop
+adjusting, and again on Quit; the file is replaced atomically, so a crash can't leave it half-written. Copy `config.example.json` to
 `config.json` to start from a sane tuned baseline, or just run the app — every key falls back to a
 built-in default, and old config layouts are migrated automatically on load.
 

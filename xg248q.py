@@ -27,7 +27,12 @@ class XG248Q:
 
     def _cmd(self, reg, val):
         self.writes += 1
-        return send(self.dev, [0x03, 0x02, 0xA1, 0x80, reg, val, 0x00, 0x00], 8)
+        r = send(self.dev, [0x03, 0x02, 0xA1, 0x80, reg, val, 0x00, 0x00], 8)
+        if r < 0:
+            # used to be ignored: an unplugged or slept monitor then failed
+            # every write silently and was never reopened
+            raise IOError(f"feature report failed: {hid.hid_error(self.dev)}")
+        return r
 
     def set_colors(self, colors, force=False):
         regs = {}

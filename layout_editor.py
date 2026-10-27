@@ -43,8 +43,8 @@ class LayoutEditor(tk.Toplevel):
         self.get_engine = get_engine
         self.title("Screen layout")
         self.configure(bg=BG)
-        self.geometry("880x560")
-        self.minsize(760, 480)
+        self.geometry("900x640")
+        self.minsize(780, 620)       # the side panel needs ~600px to show the readout
 
         self.selected = "bm38"
         self.drag = None
@@ -155,8 +155,12 @@ class LayoutEditor(tk.Toplevel):
     # -------------------------------------------------------------- mouse --
     def _press(self, e):
         # topmost first: selected device wins, then reverse draw order
+        # disabled devices aren't drawn, so they mustn't catch clicks either -
+        # an invisible box (the mouse's, say) would steal them
         order = [self.selected] + [k for k, _n, _c in reversed(DEVICES) if k != self.selected]
         for key in order:
+            if not CFG["enabled"].get(key, True):
+                continue
             x0, y0, x1, y1 = self._rect_px(key)
             if x1 - HANDLE <= e.x <= x1 + 4 and y1 - HANDLE <= e.y <= y1 + 4:
                 self.dev_var.set(key); self._select()

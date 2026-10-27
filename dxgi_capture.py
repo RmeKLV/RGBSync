@@ -319,6 +319,12 @@ class DXGIGrabber:
         code = hr & 0xFFFFFFFF
         if code == DXGI_ERROR_WAIT_TIMEOUT:
             # nothing new on screen: the last frame is still the right answer
+            if self._last is None:
+                # ...unless there has never been one. Duplication only reports
+                # changes, so a desktop that is perfectly still at startup
+                # yields no frame at all and the lights would sit black until
+                # something moved. One GDI grab fills the gap.
+                self._last = self._gdi_prime()
             return self._last or bytes(self.cols * self.rows * 4)
         if code == DXGI_ERROR_ACCESS_LOST:
             _release(self.dup)
@@ -373,6 +379,17 @@ class DXGIGrabber:
         else:
             self._last = self._fp16_to_bgra(rows, xs)
         return self._last
+
+    def _gdi_prime(self):
+        try:
+            from screen import ScreenGrabber
+            g = ScreenGrabber(self.cols, self.rows)
+            try:
+                return g.grab()
+            finally:
+                g.close()
+        except Exception:
+            return None
 
     @staticmethod
     def _fp16_to_bgra(rows, xs):

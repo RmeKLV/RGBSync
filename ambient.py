@@ -36,7 +36,8 @@ Shutdown and sleep are caught by power.PowerWatcher and blacked out before
 Windows carries on. What happens after the process is gone is down to the
 hardware - see the README's "Dark when the PC is off".
 """
-import time, sys, json, os, signal, atexit, shutil, threading
+import time, sys, json, os, signal, atexit, shutil, threading, queue
+from concurrent.futures import Future
 
 from screen import CaptureThread, Sampler, _srgb_to_linear
 from orgb import OpenRGBClient
@@ -208,8 +209,13 @@ def load_config():
 
 
 def save_config():
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    """Write via a temp file and an atomic rename, so a crash or power cut
+    mid-write can never leave a half-written config.json behind (which would
+    load as nothing and silently reset every setting)."""
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(CFG, f, indent=2)
+    os.replace(tmp, CONFIG_PATH)
 
 
 def reset_regions():
@@ -375,6 +381,7 @@ class Engine:
         self._need_dark = False
         self._dark_ack = threading.Event()
         self._thread = None
+        self._calls = queue.SimpleQueue()   # see call()
 
         grid = CFG.get("grid") or [GRID_C, GRID_R]
         self.C, self.R = int(grid[0]), int(grid[1])
@@ -441,6 +448,40 @@ class Engine:
             self.power.wait_ready()
         except Exception as e:
             self.log(f"power   : no shutdown/sleep notifications ({e})")
+
+    def call(self, fn):
+        """Run fn on the engine thread; -> concurrent.futures.Future.
+
+        Device handles and the OpenRGB socket belong to the frame loop. The
+        GUI's Rescan and device checkboxes used to act on them from other
+        threads while the loop was mid-write - two writers on one OpenRGB
+        socket can interleave packets and desync the protocol. Queued here,
+        they run between frames instead. Runs immediately when no loop is
+        running.
+        """
+        fut = Future()
+        loop = self._thread
+        if (not self.running or loop is None or not loop.is_alive()
+                or loop is threading.current_thread()):
+            self._run_call(fn, fut)
+        else:
+            self._calls.put((fn, fut))
+        return fut
+
+    @staticmethod
+    def _run_call(fn, fut):
+        try:
+            fut.set_result(fn())
+        except Exception as e:
+            fut.set_exception(e)
+
+    def _run_calls(self):
+        while True:
+            try:
+                fn, fut = self._calls.get_nowait()
+            except queue.Empty:
+                return
+            self._run_call(fn, fut)
 
     def _am8_light(self, on):
         """The mic's own lighting switch (see AM8Pro.set_light). Engine thread only."""
@@ -823,7 +864,33 @@ class Engine:
             if self.faults[key] >= self.MAX_FAULTS:
                 self.dead.add(key)
                 self.found[key] = None
-                self.log(f"{key}: disabled after {self.MAX_FAULTS} failures")
+                self._drop(key)
+                self.log(f"{key}: lost after {self.MAX_FAULTS} failures - "
+                         f"reconnecting shortly")
+
+    def _drop(self, key):
+        """Let go of a device that stopped answering, so rescan reopens it.
+
+        Five failures in a row almost always means a stale handle: unplugged,
+        or the PC slept and USB re-enumerated. The old handle used to be kept,
+        and rescan only opens slots that are empty - so the device never came
+        back until the app was restarted.
+        """
+        if key == "kbd" and self.kbd_hid is not None:
+            d, self.kbd_hid = self.kbd_hid, None     # our HID handle: close it
+        elif key in ORGB_KEYS:
+            setattr(self, key, None)                 # SDK device: _discover_orgb rebinds
+            d = None
+        else:
+            d = getattr(self, key, None)
+            setattr(self, key, None)
+        if d is not None:
+            try:
+                d.close()
+            except Exception:
+                pass
+        # retry in ~2s rather than waiting out the whole rescan interval
+        self._last_rescan = time.time() - CFG.get("rescan_sec", 20) + 2
 
     def frame(self):
         raw = self.cap.latest()
@@ -871,6 +938,7 @@ class Engine:
         cpu_t, cpu_c = time.perf_counter(), time.process_time()
         while self.running:
             t = time.perf_counter()
+            self._run_calls()
             if self._check_session():
                 # Paused is not idle: the Fifine pair need a steady stream of
                 # black or they light back up with their own effect.
@@ -904,6 +972,8 @@ class Engine:
                 if n >= 300:
                     n, t0, worst = 0, time.perf_counter(), 0.0
             time.sleep(max(0.0, 1.0 / max(1, CFG["fps"]) - dt))
+        self.running = False
+        self._run_calls()                    # nothing queued may be left hanging
         self.blackout()
 
     def _maybe_rescan(self):
