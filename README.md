@@ -64,7 +64,7 @@ while a stream of frames keeps arriving; once it stops they go back to their onb
 | Motherboard | BIOS → Advanced → Onboard Devices Configuration → **LED lighting → Stealth mode** for the sleep/off states. |
 
 Sleep (S3) keeps USB powered and ErP does not apply, so the arm shows its onboard effect
-while the PC sleeps unless their own lighting is set to off.
+while the PC sleeps unless its own lighting is switched off on the arm.
 
 ## Performance
 
