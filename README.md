@@ -74,8 +74,9 @@ even when the engine ran at 30-60 fps and even while paused. Now:
 
 - capture uses **DXGI Desktop Duplication** (`dxgi_capture.py`): the GPU shrinks the desktop with
   its own mipmaps, and only a ~80x45 image (a few KB) is read back. When nothing on screen has
-  changed, the last frame is reused at no cost. If it can't start (HDR desktop, rotated display,
-  remote session) or keeps failing, it falls back to GDI on its own. The status line shows which
+  changed, the last frame is reused at no cost. Frames that arrive in 16-bit colour (Windows 11
+  Auto Color Management or HDR) are handled too, and converted after the GPU shrinks them. If it
+  can't start (rotated display, remote session) or keeps failing, it falls back to GDI on its own. The status line shows which
   one is running (`dxgi` or `gdi`), and `capture` in the config can force either;
 - capture runs at the engine's frame rate (default **30**; no device accepts colour faster), and
   stops entirely while paused or held dark;

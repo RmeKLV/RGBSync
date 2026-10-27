@@ -20,7 +20,7 @@ instead of raising, so do not edit them without recounting.
 Output is identical in shape to ScreenGrabber.grab(): cols*rows*4 bytes, BGRA,
 top-down - so Sampler, Letterbox and everything downstream are unchanged.
 """
-import ctypes, uuid
+import ctypes, uuid, struct
 from ctypes import c_void_p, POINTER, byref
 
 # Explicit widths, not wintypes/c_long: those follow the platform's C `long`,
@@ -33,6 +33,22 @@ d3d11 = ctypes.WinDLL("d3d11")
 
 # ---------------------------------------------------------------- constants --
 DXGI_FORMAT_B8G8R8A8_UNORM = 87
+DXGI_FORMAT_R16G16B16A16_FLOAT = 10
+# Bytes per texel for the desktop formats we accept. DuplicateOutput is meant
+# to hand back BGRA8, but with Windows 11 Auto Color Management (or HDR) on,
+# DWM composes in FP16 scRGB and frames can arrive as R16G16B16A16_FLOAT -
+# seen on the XG248Q, intermittently. We follow whatever arrives.
+_BPP = {DXGI_FORMAT_B8G8R8A8_UNORM: 4, DXGI_FORMAT_R16G16B16A16_FLOAT: 8}
+
+# scRGB linear value that is SDR white. 1.0 on an SDR display under Auto Color
+# Management; with HDR on, Windows maps SDR white to its "SDR content
+# brightness" level, which can be 2-3x this, and bright areas would clip.
+SDR_WHITE = 1.0
+
+_LUT_N = 4096
+_TO_SRGB = bytes(
+    int(255.0 * (v * 12.92 if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055) + 0.5)
+    for v in (i / (_LUT_N - 1) for i in range(_LUT_N)))
 D3D11_SDK_VERSION = 7
 D3D_DRIVER_TYPE_UNKNOWN = 0
 D3D11_CREATE_DEVICE_BGRA_SUPPORT = 0x20
@@ -235,17 +251,20 @@ class DXGIGrabber:
             "DuplicateOutput")
         self.dup = d.value
 
-    def _make_textures(self):
+    def _make_textures(self, fmt=DXGI_FORMAT_B8G8R8A8_UNORM):
+        """Mip chain + staging texture in `fmt` (the desktop's own format -
+        CopySubresourceRegion needs the two to match)."""
         # smallest mip level that still covers the sampling grid
         lvl = 0
         while ((self.sw >> (lvl + 1)) >= self.cols and (self.sh >> (lvl + 1)) >= self.rows):
             lvl += 1
         self.level = lvl
         self.mw, self.mh = max(1, self.sw >> lvl), max(1, self.sh >> lvl)
+        self.fmt = None         # set last: a half-built set must never be used
 
         desc = D3D11_TEXTURE2D_DESC(
             Width=self.sw, Height=self.sh, MipLevels=lvl + 1, ArraySize=1,
-            Format=DXGI_FORMAT_B8G8R8A8_UNORM, SampleDesc=DXGI_SAMPLE_DESC(1, 0),
+            Format=fmt, SampleDesc=DXGI_SAMPLE_DESC(1, 0),
             Usage=D3D11_USAGE_DEFAULT,
             BindFlags=D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
             CPUAccessFlags=0, MiscFlags=D3D11_RESOURCE_MISC_GENERATE_MIPS)
@@ -263,7 +282,7 @@ class DXGIGrabber:
 
         sdesc = D3D11_TEXTURE2D_DESC(
             Width=self.mw, Height=self.mh, MipLevels=1, ArraySize=1,
-            Format=DXGI_FORMAT_B8G8R8A8_UNORM, SampleDesc=DXGI_SAMPLE_DESC(1, 0),
+            Format=fmt, SampleDesc=DXGI_SAMPLE_DESC(1, 0),
             Usage=D3D11_USAGE_STAGING, BindFlags=0,
             CPUAccessFlags=D3D11_CPU_ACCESS_READ, MiscFlags=0)
         s = c_void_p()
@@ -275,10 +294,11 @@ class DXGIGrabber:
         # Nearest-sample the mip onto the grid. Each mip texel is already the
         # average of a (2^lvl)^2 block, and the mip is less than 2x the grid
         # in each direction, so every grid cell is mostly covered.
-        self._xs = [min(self.mw - 1, int((x + 0.5) * self.mw / self.cols)) * 4
+        self._xs = [min(self.mw - 1, int((x + 0.5) * self.mw / self.cols))
                     for x in range(self.cols)]
         self._ys = [min(self.mh - 1, int((y + 0.5) * self.mh / self.rows))
                     for y in range(self.rows)]
+        self.fmt = fmt
 
     # ------------------------------------------------------------- frame --
     def grab(self):
@@ -313,11 +333,14 @@ class DXGIGrabber:
             try:
                 d = D3D11_TEXTURE2D_DESC()
                 _call(tex, _TEX2D_GETDESC, None, (POINTER(D3D11_TEXTURE2D_DESC), byref(d)))
-                if (d.Format != DXGI_FORMAT_B8G8R8A8_UNORM
-                        or d.Width != self.sw or d.Height != self.sh):
+                if d.Format not in _BPP or d.Width != self.sw or d.Height != self.sh:
                     raise OSError(f"desktop texture is format {d.Format}, "
-                                  f"{d.Width}x{d.Height} - expected BGRA8 "
-                                  f"{self.sw}x{self.sh} (HDR on, or resolution changed)")
+                                  f"{d.Width}x{d.Height} - expected "
+                                  f"{self.sw}x{self.sh} BGRA8 or FP16 "
+                                  f"(resolution changed?)")
+                if d.Format != self.fmt or not self.mip_tex:
+                    self._free_textures()
+                    self._make_textures(d.Format)
                 _call(self.context, _CTX_COPYSUBRESOURCEREGION, None,
                       (c_void_p, self.mip_tex), (c_uint, 0),
                       (c_uint, 0), (c_uint, 0), (c_uint, 0),
@@ -338,14 +361,42 @@ class DXGIGrabber:
         _hr(_call(self.context, _CTX_MAP, c_long, (c_void_p, self.staging), (c_uint, 0),
                   (c_uint, D3D11_MAP_READ), (c_uint, 0),
                   (POINTER(D3D11_MAPPED_SUBRESOURCE), byref(m))), "Map")
+        bpp = _BPP[self.fmt]
         try:
             pitch = m.RowPitch
-            rows = [ctypes.string_at(m.pData + y * pitch, self.mw * 4) for y in self._ys]
+            rows = [ctypes.string_at(m.pData + y * pitch, self.mw * bpp) for y in self._ys]
         finally:
             _call(self.context, _CTX_UNMAP, None, (c_void_p, self.staging), (c_uint, 0))
         xs = self._xs
-        self._last = b"".join(row[x:x + 4] for row in rows for x in xs)
+        if self.fmt == DXGI_FORMAT_B8G8R8A8_UNORM:
+            self._last = b"".join(row[x * 4:x * 4 + 4] for row in rows for x in xs)
+        else:
+            self._last = self._fp16_to_bgra(rows, xs)
         return self._last
+
+    @staticmethod
+    def _fp16_to_bgra(rows, xs):
+        """scRGB half floats (linear, RGBA) -> sRGB BGRA bytes, as GDI gives.
+
+        The mips were averaged in linear light, which is what this format is.
+        """
+        lut, top, k = _TO_SRGB, _LUT_N - 1, (_LUT_N - 1) / SDR_WHITE
+        out = bytearray()
+        for row in rows:
+            for x in xs:
+                r, g, b, _a = struct.unpack_from("<4e", row, x * 8)
+                out += bytes((lut[min(top, max(0, int(b * k + 0.5)))],
+                              lut[min(top, max(0, int(g * k + 0.5)))],
+                              lut[min(top, max(0, int(r * k + 0.5)))], 255))
+        return bytes(out)
+
+    def _free_textures(self):
+        for name in ("staging", "srv", "mip_tex"):
+            obj = getattr(self, name, None)
+            if obj:
+                _release(obj)
+                setattr(self, name, None)
+        self.fmt = None
 
     def close(self):
         for name in ("dup", "staging", "srv", "mip_tex", "context", "device",
