@@ -16,7 +16,7 @@ except Exception:
     except Exception:
         pass
 
-SRCCOPY, HALFTONE, BI_RGB = 0x00CC0020, 4, 0
+SRCCOPY, COLORONCOLOR, HALFTONE, BI_RGB = 0x00CC0020, 3, 4, 0
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -133,7 +133,7 @@ class Sampler:
 class ScreenGrabber:
     """Downsamples the primary monitor to a cols x rows BGRA grid."""
 
-    def __init__(self, cols=48, rows=27):
+    def __init__(self, cols=48, rows=27, stretch=HALFTONE):
         self.cols, self.rows = cols, rows
         self.sw = user32.GetSystemMetrics(0)
         self.sh = user32.GetSystemMetrics(1)
@@ -141,7 +141,7 @@ class ScreenGrabber:
         self.hdc_mem = gdi32.CreateCompatibleDC(self.hdc_screen)
         self.hbm = gdi32.CreateCompatibleBitmap(self.hdc_screen, cols, rows)
         gdi32.SelectObject(self.hdc_mem, self.hbm)
-        gdi32.SetStretchBltMode(self.hdc_mem, HALFTONE)
+        gdi32.SetStretchBltMode(self.hdc_mem, stretch)
 
         self.bmi = BITMAPINFO()
         h = self.bmi.bmiHeader
@@ -170,9 +170,15 @@ class CaptureThread(threading.Thread):
     """Grabs continuously; `latest()` returns the most recent frame.
 
     The grabber is created inside run() so its GDI objects belong to this thread.
+
+    Every grab makes DWM hand the composited desktop back from the GPU and
+    scales it on the CPU, so this is the one part of the app a game can feel.
+    The engine sets max_fps to its own frame rate each tick - this used to run
+    at a fixed 120/s while the engine consumed 30-60 - and pauses it outright
+    while the lights are held dark.
     """
 
-    def __init__(self, cols=48, rows=27, max_fps=120):
+    def __init__(self, cols=48, rows=27, max_fps=30):
         super().__init__(daemon=True)
         self.cols, self.rows = cols, rows
         self.max_fps = max_fps
@@ -180,21 +186,29 @@ class CaptureThread(threading.Thread):
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._ready = threading.Event()
+        self._paused = threading.Event()
         self.fps = 0.0
+        self.grab_ms = 0.0          # mean cost of one grab, last 20 grabs
         self.screen_size = (0, 0)
 
     def run(self):
         g = ScreenGrabber(self.cols, self.rows)
         self.screen_size = (g.sw, g.sh)
-        n, t0 = 0, time.perf_counter()
+        n, t0, spent = 0, time.perf_counter(), 0.0
         try:
             while not self._stop.is_set():
+                if self._paused.is_set():
+                    self.fps = 0.0
+                    time.sleep(0.1)
+                    n, t0, spent = 0, time.perf_counter(), 0.0
+                    continue
                 t = time.perf_counter()
                 try:
                     raw = g.grab()
                 except Exception:
                     time.sleep(0.2)
                     continue
+                spent += time.perf_counter() - t
                 with self._lock:
                     self._raw = raw
                 self._ready.set()
@@ -202,9 +216,10 @@ class CaptureThread(threading.Thread):
                 if n >= 20:
                     el = time.perf_counter() - t0
                     self.fps = n / el if el else 0.0
-                    n, t0 = 0, time.perf_counter()
+                    self.grab_ms = spent / n * 1000
+                    n, t0, spent = 0, time.perf_counter(), 0.0
                 dt = time.perf_counter() - t
-                time.sleep(max(0.0, 1.0 / self.max_fps - dt))
+                time.sleep(max(0.0, 1.0 / max(1, self.max_fps) - dt))
         finally:
             g.close()
 
@@ -214,6 +229,9 @@ class CaptureThread(threading.Thread):
 
     def wait_ready(self, timeout=3.0):
         return self._ready.wait(timeout)
+
+    def pause(self, on=True):
+        (self._paused.set if on else self._paused.clear)()
 
     def stop(self):
         self._stop.set()

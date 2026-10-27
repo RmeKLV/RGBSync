@@ -434,8 +434,10 @@ class App:
             lb = getattr(eng, "letterbox", None)
             if lb is not None and lb.active:
                 extra = "   cropped"
-            self.stat.config(text=f"running   {eng.fps_actual:4.1f} fps   "
-                                  f"capture {cap:4.1f}   worst {eng.worst_ms:.0f} ms{extra}",
+            grab = getattr(eng.cap, "grab_ms", 0.0)
+            self.stat.config(text=f"running  {eng.fps_actual:4.1f} fps  "
+                                  f"capture {cap:4.1f}/s {grab:.1f} ms  "
+                                  f"cpu {eng.cpu_pct:.0f}%{extra}",
                              foreground=OK)
         elif self.starting:
             self.stat.config(text="starting...", foreground=MUTED)

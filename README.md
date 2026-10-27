@@ -65,6 +65,29 @@ while a stream of frames keeps arriving; once it stops they go back to their onb
 Sleep (S3) keeps USB powered and ErP does not apply, so the mic and arm show their onboard effect
 while the PC sleeps unless their own lighting is set to off.
 
+## Performance
+
+Screen capture is the only part a game can feel. Each grab makes Windows copy the composited desktop
+back from the GPU and scale it down on the CPU. Older versions grabbed **120 times a second, always**,
+even when the engine ran at 30-60 fps and even while paused. Now:
+
+- capture runs at the engine's frame rate (default **30**; no device accepts colour faster), and
+  stops entirely while paused or held dark;
+- the process runs at **below-normal priority** (`low_priority`), so a game's threads always go first;
+- the status line shows the live cost: capture rate, ms per grab, and the app's CPU use.
+
+To measure it on your machine, close the GUI and run:
+
+```
+python bench.py --engine
+```
+
+That compares a baseline with capture at 30/60/120 per second and the full engine. For each one it
+reports CPU use, grab time, and how late an unrelated normal-priority thread wakes up (a stand-in for
+a game). For the in-game number, run the same scene with an FPS/frametime overlay (Steam, NVIDIA,
+AMD, or CapFrameX/PresentMon for 1% lows), once with the app syncing and once after pressing Stop.
+Stop now halts capture too, so the difference between the two runs is the app's cost.
+
 ## Colour accuracy
 
 - **Linear-light sampling**: screen colours are averaged as light, not as sRGB bytes.
@@ -101,7 +124,7 @@ rgbsync_gui.py   Tkinter control panel. The engine runs on a worker thread; the
 ```
 
 Supporting modules: `letterbox.py` (black-bar detection), `session.py` (lock/idle handling),
-`power.py` (shutdown / sleep / display-off notifications),
+`power.py` (shutdown / sleep / display-off notifications), `bench.py` (performance measurement),
 `autostart.py` (registry run-key), `logbook.py` (diagnostic logging), `prereqs.py` (environment
 checks and the safe subset of fixes).
 
@@ -154,6 +177,7 @@ The interesting keys:
 | `hue_correct` | mix LED colours in linear light (see Colour accuracy) |
 | `pause_on_display_off` | black out while Windows has the monitor off |
 | `dark_when_stopped` | Stop keeps the devices black instead of letting go |
+| `low_priority` | run below normal priority so games always win the CPU |
 
 Edit regions visually with **Screen layout** in the GUI rather than by hand.
 

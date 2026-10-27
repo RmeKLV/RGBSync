@@ -75,7 +75,8 @@ DEFAULT_DEVICE = {k: _dev_defaults() for k in DEVICE_KEYS}
 DEFAULT_DEVICE["monitor"]["gain"] = [0.80, 1.00, 1.00]   # its white reads pink
 
 DEFAULTS = {
-    "fps":        45,
+    "fps":        30,          # no device takes colour faster than 30/s, and
+                               # every extra frame is an extra screen capture
     "quality":    "vivid",     # "mean" | "linear" | "vivid" - see screen.Sampler
     "vividness":  4.0,
     "grid":       [48, 27],    # capture grid; costs ~nothing until regions get small
@@ -108,7 +109,8 @@ DEFAULTS = {
     "dark_when_stopped": True, # Stop keeps streaming black instead of letting go;
                                # otherwise the mic and arm fall back to their own
                                # rainbow the moment the stream ends
-    "config_version": 2,
+    "low_priority": True,      # run below normal priority so a game always wins
+    "config_version": 3,
     "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},
     "device":  json.loads(json.dumps(DEFAULT_DEVICE)),
     "regions": json.loads(json.dumps(DEFAULT_REGIONS)),
@@ -130,18 +132,31 @@ HUE_CORRECT_SAT_FACTOR = 1.6
 
 
 def _migrate(saved):
-    """Bring a config written by an older version up to config_version 2.
+    """Bring a config written by an older version up to the current one.
 
     Runs after the saved values are loaded into CFG. The file on disk is copied
-    to config.v1.json first, so nothing tuned by hand is lost.
+    to config.v<old>.json first, so nothing tuned by hand is lost.
     """
     ver = saved.get("config_version", 1)
-    if ver >= 2:
+    if ver >= DEFAULTS["config_version"]:
         return
     try:
-        shutil.copyfile(CONFIG_PATH, CONFIG_PATH[:-len(".json")] + ".v1.json")
+        shutil.copyfile(CONFIG_PATH, CONFIG_PATH[:-len(".json")] + f".v{ver}.json")
     except OSError:
         pass
+    if ver < 2:
+        _migrate_v2(saved)
+    if ver < 3:
+        # Above 30 fps bought nothing - every device is capped at 30 or below
+        # - and cost a screen capture per frame, which is what games feel.
+        if CFG.get("fps", 30) > 30:
+            CFG["fps"] = 30
+    CFG["config_version"] = DEFAULTS["config_version"]
+    print(f"config migrated to v{CFG['config_version']} "
+          f"(previous saved as config.v{ver}.json)")
+
+
+def _migrate_v2(saved):
     # The mouse slot was a DeathAdder V2; the Viper that replaced it has no RGB.
     CFG["enabled"]["mouse"] = False
     if "hue_correct" not in saved:
@@ -152,8 +167,6 @@ def _migrate(saved):
         for d in CFG["device"].values():
             if "saturation" in d:
                 d["saturation"] = tame(d["saturation"])
-    CFG["config_version"] = 2
-    print("config migrated to v2 (previous saved as config.v1.json)")
 
 
 def load_config():
@@ -313,6 +326,21 @@ class Smoother:
         return out
 
 
+def set_low_priority(log=print):
+    """BELOW_NORMAL for the whole process, so the scheduler always picks a
+    game's threads first. A few ms late on an LED is invisible; a few ms late
+    on a game frame is a stutter."""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        if k32.SetPriorityClass(k32.GetCurrentProcess(), 0x4000):   # BELOW_NORMAL
+            log("priority: below normal")
+    except Exception:
+        pass
+
+
 class Engine:
     MAX_FAULTS = 5          # consecutive write failures before a device is dropped
     ORGB_REFRESH_SEC = 2.0  # re-send an unchanged frame to an SDK device this often
@@ -345,7 +373,10 @@ class Engine:
                             CFG.get("vividness", 4.0))
         self.letterbox = Letterbox(self.C, self.R)
         self.content = (0, 0, self.C, self.R)
-        self.cap = CaptureThread(self.C, self.R)
+        if CFG.get("low_priority", True):
+            set_low_priority(self.log)
+        self.cpu_pct = 0.0
+        self.cap = CaptureThread(self.C, self.R, max_fps=CFG["fps"])
         self.cap.start()
         if not self.cap.wait_ready(3.0):
             self.log("WARNING: no screen frame yet")
@@ -785,6 +816,7 @@ class Engine:
             self.letterbox.reset()
             self.content = (0, 0, self.C, self.R)
 
+        self.cap.max_fps = CFG["fps"]       # never grab frames nobody uses
         self.grab.mode = CFG.get("quality", "vivid")
         self.grab.vividness = CFG.get("vividness", 4.0)
         self.grab.prepare(raw)
@@ -811,6 +843,7 @@ class Engine:
         self.running = True
         self._thread = threading.current_thread()
         n, t0, worst = 0, time.perf_counter(), 0.0
+        cpu_t, cpu_c = time.perf_counter(), time.process_time()
         while self.running:
             t = time.perf_counter()
             if self._check_session():
@@ -838,6 +871,11 @@ class Engine:
                 el = time.perf_counter() - t0
                 self.fps_actual = n / el if el else 0.0
                 self.worst_ms = worst * 1000
+                # whole process, every thread: % of one CPU core
+                now_t, now_c = time.perf_counter(), time.process_time()
+                if now_t - cpu_t > 0.5:
+                    self.cpu_pct = 100.0 * (now_c - cpu_c) / (now_t - cpu_t)
+                    cpu_t, cpu_c = now_t, now_c
                 if n >= 300:
                     n, t0, worst = 0, time.perf_counter(), 0.0
             time.sleep(max(0.0, 1.0 / max(1, CFG["fps"]) - dt))
@@ -935,12 +973,14 @@ class Engine:
                 self.log(f"paused ({reason}) - lights off")
             self.paused, self.pause_reason = True, reason
             self._need_dark = False
+            self.cap.pause(True)            # nothing to sample; stop grabbing
             try: self.blackout()
             except Exception: pass
         elif pause and reason != self.pause_reason:
             self.pause_reason = reason
         elif not pause and self.paused:
             self.paused, self.pause_reason = False, ""
+            self.cap.pause(False)
             self.log("resumed")
             self._last_mode_refresh = 0.0
             self._refresh_modes()
