@@ -313,6 +313,22 @@ class App:
                     lambda on: CFG.__setitem__("letterbox", on),
                     "Ignores letterbox bars in films. Best-guess detection - it holds "
                     "off unless confident.")
+        card = self._card(tab_beh, "Screen capture")
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.pack(fill="x")
+        self.capture = tk.StringVar(value=CFG.get("capture", "auto"))
+        for val, txt in self.CAPTURE_CHOICES:
+            ttk.Radiobutton(row, text=txt, value=val, variable=self.capture,
+                            command=self._set_capture).pack(side="left", padx=(0, 10))
+        self.cap_hint = self._hint(card, "", pady=(4, 6))
+        self._check(card, "Release capture while a game is in front",
+                    lambda: CFG.get("pause_in_games", True),
+                    lambda on: CFG.__setitem__("pause_in_games", on),
+                    "Lights go dark while a full-screen game runs, and the capture is "
+                    "dropped entirely. Only for games that stutter with any capture on. "
+                    "Borderless games: add the exe name to game_processes in config.json.")
+        self._set_capture(log=False)
+
         ttk.Label(tab_beh, text="Settings are saved automatically.",
                   style="Muted.TLabel", font=("Segoe UI", 8)).pack(anchor="w", pady=(10, 0))
 
@@ -341,6 +357,24 @@ class App:
         "vivid":  "Linear, but saturated pixels count for more, so a colourful "
                   "object drives the colour instead of averaging into grey.",
     }
+
+    CAPTURE_CHOICES = (("auto", "Auto"), ("wgc", "Graphics Capture"),
+                       ("dxgi", "Desktop Duplication"), ("gdi", "GDI"))
+    CAPTURE_HINTS = {
+        "auto": "Desktop Duplication, falling back to GDI if it can't start.",
+        "wgc":  "Windows Graphics Capture, the method OBS uses. Kept games smooth where "
+                "Desktop Duplication did not. Falls back to Desktop Duplication, then GDI.",
+        "dxgi": "Desktop Duplication. Fast, but a game can lose its direct display path "
+                "while it is attached, which feels like fewer Hz.",
+        "gdi":  "Oldest method: about 12 ms per grab and ~15% of a core. A last resort.",
+    }
+
+    def _set_capture(self, log=True):
+        CFG["capture"] = self.capture.get()
+        self.cap_hint.config(text=self.CAPTURE_HINTS.get(CFG["capture"], ""))
+        if log:
+            self.write(f"capture method -> {CFG['capture']} "
+                       f"({'applied now' if self.engine else 'used on Start'})")
 
     def _set_quality(self, log=True):
         CFG["quality"] = self.quality.get()
