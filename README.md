@@ -79,8 +79,19 @@ even when the engine ran at 30-60 fps and even while paused. Now:
   Auto Color Management or HDR) are handled too, and converted after the GPU shrinks them. If it
   can't start (rotated display, remote session) or keeps failing, it falls back to GDI on its own. The status line shows which
   one is running (`dxgi` or `gdi`), and `capture` in the config can force either;
+- **experimental `"capture": "wgc"`** uses Windows Graphics Capture (`wgc_capture.py`), the pipeline
+  OBS uses, with the same GPU shrink and tiny readback. It falls back to DXGI, then GDI, if it can't
+  start. It exists to test whether a game stays smooth with the lights still following the screen;
+  measure it with the in-game A/B described below, don't assume;
 - capture runs at the engine's frame rate (default **30**; no device accepts colour faster), and
   stops entirely while paused or held dark;
+- **games get the screen to themselves** (`pause_in_games`): while an exclusive-fullscreen Direct3D
+  game, or a program in `game_processes` (default: CoD4's `iw3mp.exe` / `iw3sp.exe`), is in front,
+  the capture is shut down completely and the lights are held dark. This matters because Desktop
+  Duplication being attached to a monitor keeps Windows' compositor in the loop for it, so a game
+  can't use its direct display path and feels like it runs at fewer Hz even at the same fps. Pausing
+  or Stop releases the duplication too, not just the grabbing. Add other borderless games by exe
+  name. OBS Display Capture uses the same API, so prefer OBS *Game Capture* for replays;
 - the process runs at **below-normal priority** (`low_priority`), so a game's threads always go first;
 - the status line shows the live cost: capture rate, ms per grab, and the app's CPU use.
 
@@ -188,7 +199,9 @@ The interesting keys:
 | `hue_correct` | mix LED colours in linear light (see Colour accuracy) |
 | `pause_on_display_off` | black out while Windows has the monitor off |
 | `dark_when_stopped` | Stop keeps the devices black instead of letting go |
-| `capture` | `auto` (DXGI, falling back to GDI), `dxgi`, or `gdi` |
+| `capture` | `auto` (DXGI, falling back to GDI), `wgc` (Windows Graphics Capture, falling back to DXGI then GDI), `dxgi`, or `gdi`. Also in the GUI under Behaviour → Screen capture, and applied live |
+| `pause_in_games` | while a game is in front, drop the capture and hold the lights dark (default on; off in the GUI if `wgc` keeps your games smooth) |
+| `game_processes` | exe names counted as games for `pause_in_games`, e.g. `["iw3mp.exe"]`. Exclusive-fullscreen D3D games are detected without being listed |
 | `am8_light_off` | switch the mic's own lighting off when the app lets go |
 | `close_to_background` | closing the GUI window hides it and holds the lights dark instead of exiting |
 | `low_priority` | run below normal priority so games always win the CPU |

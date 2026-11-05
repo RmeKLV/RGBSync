@@ -228,6 +228,7 @@ class DXGIGrabber:
                     finally:
                         _release(out.value)
                     self.adapter = ad.value
+                    self.hmon = desc.Monitor
                     self.sw, self.sh = r.right - r.left, r.bottom - r.top
                     return
                 _release(out.value)
@@ -337,26 +338,35 @@ class DXGIGrabber:
                 return self._last                # only the mouse moved
             tex = _qi(res.value, IID_ID3D11Texture2D)
             try:
-                d = D3D11_TEXTURE2D_DESC()
-                _call(tex, _TEX2D_GETDESC, None, (POINTER(D3D11_TEXTURE2D_DESC), byref(d)))
-                if d.Format not in _BPP or d.Width != self.sw or d.Height != self.sh:
-                    raise OSError(f"desktop texture is format {d.Format}, "
-                                  f"{d.Width}x{d.Height} - expected "
-                                  f"{self.sw}x{self.sh} BGRA8 or FP16 "
-                                  f"(resolution changed?)")
-                if d.Format != self.fmt or not self.mip_tex:
-                    self._free_textures()
-                    self._make_textures(d.Format)
-                _call(self.context, _CTX_COPYSUBRESOURCEREGION, None,
-                      (c_void_p, self.mip_tex), (c_uint, 0),
-                      (c_uint, 0), (c_uint, 0), (c_uint, 0),
-                      (c_void_p, tex), (c_uint, 0), (c_void_p, None))
+                self._copy_in(tex)
             finally:
                 _release(tex)
         finally:
             _release(res.value)
             _call(self.dup, _DUPL_RELEASEFRAME, c_long)
 
+        return self._readback()
+
+    def _copy_in(self, tex):
+        """Copy a desktop texture into the mip chain (rebuilding it if the
+        desktop's format changed). Shared with the WGC backend."""
+        d = D3D11_TEXTURE2D_DESC()
+        _call(tex, _TEX2D_GETDESC, None, (POINTER(D3D11_TEXTURE2D_DESC), byref(d)))
+        if d.Format not in _BPP or d.Width != self.sw or d.Height != self.sh:
+            raise OSError(f"desktop texture is format {d.Format}, "
+                          f"{d.Width}x{d.Height} - expected "
+                          f"{self.sw}x{self.sh} BGRA8 or FP16 "
+                          f"(resolution changed?)")
+        if d.Format != self.fmt or not self.mip_tex:
+            self._free_textures()
+            self._make_textures(d.Format)
+        _call(self.context, _CTX_COPYSUBRESOURCEREGION, None,
+              (c_void_p, self.mip_tex), (c_uint, 0),
+              (c_uint, 0), (c_uint, 0), (c_uint, 0),
+              (c_void_p, tex), (c_uint, 0), (c_void_p, None))
+
+    def _readback(self):
+        """GPU-shrink the mip chain and read the small level back -> BGRA grid."""
         _call(self.context, _CTX_GENERATEMIPS, None, (c_void_p, self.srv))
         _call(self.context, _CTX_COPYSUBRESOURCEREGION, None,
               (c_void_p, self.staging), (c_uint, 0),

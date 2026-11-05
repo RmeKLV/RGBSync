@@ -112,6 +112,8 @@ DEFAULTS = {
                                # otherwise the mic and arm fall back to their own
                                # rainbow the moment the stream ends
     "capture":    "auto",      # "auto" (DXGI, falling back to GDI) | "dxgi" | "gdi"
+                               # | "wgc" (Windows Graphics Capture, falling back to
+                               # DXGI then GDI; experimental - see README)
     "am8_light_off": True,     # switch the AM8 Pro's own lighting off whenever
                                # we let go (exit, shutdown, sleep), so it stays
                                # dark; back on when we take over. The BM38 has
@@ -120,6 +122,14 @@ DEFAULTS = {
                                # the lights dark instead of exiting (the BM38
                                # arm can only be kept dark by a running app)
     "low_priority": True,      # run below normal priority so a game always wins
+    "pause_in_games": True,    # while a game is in front: release the screen capture
+                               # entirely and hold the lights dark. Desktop
+                               # Duplication being attached to the monitor stops
+                               # Windows giving a game its direct display path,
+                               # which feels like fewer Hz.
+    "game_processes": ["iw3mp.exe", "iw3sp.exe"],   # CoD4. Exclusive-fullscreen
+                               # D3D games are detected without being listed;
+                               # add borderless ones here (exe file names).
     "config_version": 3,
     "enabled": {k: (k != "mouse") for k in DEVICE_KEYS},
     "device":  json.loads(json.dumps(DEFAULT_DEVICE)),
@@ -909,6 +919,7 @@ class Engine:
             self.content = (0, 0, self.C, self.R)
 
         self.cap.max_fps = CFG["fps"]       # never grab frames nobody uses
+        self.cap.set_backend(CFG.get("capture", "auto"))    # no-op unless changed
         self.grab.mode = CFG.get("quality", "vivid")
         self.grab.vividness = CFG.get("vividness", 4.0)
         self.grab.prepare(raw)
@@ -1036,7 +1047,14 @@ class Engine:
         return False
 
     def _poll_session(self):
-        """'locked' / 'idle' / '' from the Windows session, per the settings."""
+        """'game' / 'locked' / 'idle' / '' from the Windows session, per the settings."""
+        if CFG.get("pause_in_games", True):
+            try:
+                import gamedetect
+                if gamedetect.game_active(CFG.get("game_processes") or ()):
+                    return "game"
+            except Exception:
+                pass
         if not CFG.get("pause_on_lock", True) and not CFG.get("idle_timeout", 0):
             return ""
         try:
